@@ -7,6 +7,7 @@ import { MarketScannerTable } from "@/components/MarketScannerTable";
 import { WatchlistSidebar } from "@/components/WatchlistSidebar";
 import { BacktestLedger } from "@/components/BacktestLedger";
 import { TelegramSettings } from "@/components/TelegramSettings";
+import { AlertsPanel } from "@/components/AlertsPanel";
 
 export default function DashboardPage() {
     const [candidates, setCandidates] = useState<CandidateRow[]>([]);
@@ -69,6 +70,7 @@ export default function DashboardPage() {
 
                 {/* Right: Watchlist Sidebar */}
                 <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+                    <AlertsPanel />
                     <TelegramSettings />
                     <BacktestLedger />
                     <WatchlistSidebar

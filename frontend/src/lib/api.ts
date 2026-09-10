@@ -211,3 +211,39 @@ export async function resetScoringConfig(): Promise<any> {
     if (!res.ok) throw new Error(`Reset config failed: ${res.status}`);
     return res.json();
 }
+
+// ── Alert endpoints ──────────────────────────────────────────────────────────
+
+export interface AlertRow {
+    id: string;
+    product_id: string;
+    alert_type: string;
+    price_at_alert: number;
+    zone_price: number | null;
+    label_at_alert: string | null;
+    score_at_alert: number | null;
+    created_at: string;
+    delivered_at?: string | null;
+    suppressed: boolean;
+    dismissed_by_user?: boolean;
+}
+
+/** Recent alerts, newest first. */
+export async function fetchAlerts(page = 1, perPage = 20): Promise<AlertRow[]> {
+    const res = await apiFetch(`/api/v1/alerts?page=${page}&per_page=${perPage}`);
+    if (!res.ok) throw new Error(`Alerts fetch failed: ${res.status}`);
+    return res.json();
+}
+
+/** Undelivered alerts (held back by quiet hours). */
+export async function fetchPendingAlerts(): Promise<AlertRow[]> {
+    const res = await apiFetch("/api/v1/alerts/pending");
+    if (!res.ok) throw new Error(`Pending alerts fetch failed: ${res.status}`);
+    return res.json();
+}
+
+export async function dismissAlert(alertId: string): Promise<{ alert_id: string; dismissed: boolean }> {
+    const res = await apiFetch(`/api/v1/alerts/${encodeURIComponent(alertId)}/dismiss`, { method: "PATCH" });
+    if (!res.ok) throw new Error(`Dismiss alert failed: ${res.status}`);
+    return res.json();
+}

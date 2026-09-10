@@ -5,10 +5,16 @@ engine evaluation, and database persistence.
 
 Write discipline
 ----------------
-SQLite allows a single writer at a time. Every write in this module runs inside
-`db_write_lock`, and the ORM session's pending changes are **explicitly
-committed** — closing an AsyncSession without committing rolls the transaction
-back, which silently discarded every scan result.
+SQLite allows a single writer at a time, and every write in this module runs
+inside `db_write_lock`. Two rules keep that lock cheap:
+
+1. The ORM session's pending changes are **explicitly committed** — closing an
+   AsyncSession without committing rolls the transaction back (which previously
+   discarded every scan result).
+2. The lock is **not held across network I/O**. All features/scores/ladders are
+   computed into plain row dicts first; the lock is then taken once, briefly, to
+   write everything. Holding it for the whole scan stalled every reader and
+   writer for the scan's full duration.
 """
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -39,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 def extract_l2_vol(l2_book: dict[str, Any], spot_price: float) -> tuple[float, float]:
+    """Sum USD liquidity within 2% of spot on each side of the book."""
     buy_vol = 0.0
     sell_vol = 0.0
     for b in l2_book.get("bids", []):
@@ -152,18 +159,20 @@ async def _execute_scan(
     scan_run_id = new_uuid()
     started_at = utcnow_iso()
 
-    async with AsyncSessionLocal() as db:
-        scan_run = ScanRun(
+    # Record the RUNNING marker and read the watchlist (short critical section).
+    async with db_write_lock, AsyncSessionLocal() as db:
+        db.add(ScanRun(
             id=scan_run_id,
             trigger=trigger,
             started_at=started_at,
             status="RUNNING",
             config_snapshot=json.dumps(cfg.model_dump()),
-        )
-        db.add(scan_run)
+        ))
         await db.commit()
 
-        watchlist_res = await db.execute(select(Symbol.product_id).where(Symbol.on_watchlist == 1))
+        watchlist_res = await db.execute(
+            select(Symbol.product_id).where(Symbol.on_watchlist == 1)
+        )
         watchlist_set = set(watchlist_res.scalars().all())
 
     try:
@@ -174,11 +183,6 @@ async def _execute_scan(
             raise RuntimeError("No active USD products returned from exchange.")
 
         product_ids = [p["id"] for p in products]
-
-        # NOTE: live WebSocket buffers are (re)balanced at the END of the scan,
-        # once the candidate ranking is known — see the bounded subscription
-        # block below. Subscribing per-symbol inside the loop exhausted the
-        # event loop's file descriptors.
 
         # 2. Phase 1: Fetch 24h stats for active products
         async def fetch_stats(pid: str) -> tuple[str, dict[str, Any] | None]:
@@ -268,12 +272,19 @@ async def _execute_scan(
             if c6h is not None:
                 candles_6h_map[pid] = c6h
 
-        # 5. Phase 3: features, scoring, labeling, laddering
+        # 5. Phase 3: features, scoring, labeling, laddering.
+        # No database session is open in this section, so the write lock is not
+        # held across the scan's network I/O.
         candidates_out: list[dict[str, Any]] = []
         pending_signals: list[tuple[Any, ...]] = []
         telegram_alerts: list[dict[str, Any]] = []
+        snapshot_rows: list[dict[str, Any]] = []
+        feature_rows: list[dict[str, Any]] = []
+        score_rows: list[dict[str, Any]] = []
+        ladder_rows: list[dict[str, Any]] = []
 
         from tpt.engine.regime import detect_regime
+
         current_regime = "TRENDING_UP"
         if "BTC-USD" in stats_map:
             try:
@@ -291,15 +302,240 @@ async def _execute_scan(
             except Exception as exc:
                 logger.warning("Regime detection failed: %s", exc)
 
+        # BTC market-state gate for macro beta protection (pure computation).
+        btc_beta_state = "RANGING"
+        btc_1h = candles_1h_map.get("BTC-USD")
+        if btc_1h and len(btc_1h) >= 20:
+            b_closes = [float(c[4]) for c in btc_1h if len(c) >= 5]
+            if len(b_closes) >= 20:
+                sma_20 = sum(b_closes[-21:-1]) / 20.0
+                if b_closes[-1] < sma_20 and (btc_day_change or 0.0) < -1.5:
+                    btc_beta_state = "DUMPING"
+                elif b_closes[-1] > sma_20 and (btc_day_change or 0.0) > 1.5:
+                    btc_beta_state = "PUMPING"
+
+        for pid in product_ids:
+            if pid in stale_symbols:
+                snapshot_rows.append({"product_id": pid, "is_stale": 1})
+                continue
+
+            st = stats_map[pid]
+            c1h = candles_1h_map.get(pid)
+            c1d = candles_1d_map.get(pid)
+            c15m = candles_15m_map.get(pid)
+            c6h = candles_6h_map.get(pid)
+            pinned = (pid in watchlist_set)
+
+            feats = compute_features(
+                raw_stats=st,
+                raw_ticker=st,
+                raw_candles_1h=c1h,
+                raw_candles_1d=c1d,
+                btc_day_change_pct=btc_day_change,
+                raw_candles_15m=c15m,
+                raw_candles_6h=c6h,
+            )
+            feats["product_id"] = pid
+
+            # Score both directions, then pick the better with a trend constraint
+            long_score = score(feats, cfg.scoring, trade_direction="LONG", regime=current_regime)
+            short_score = score(feats, cfg.scoring, trade_direction="SHORT", regime=current_regime)
+
+            day_chg = float(feats.get("day_change_pct") or 0.0)
+            is_short_allowed = True
+            if day_chg > 3.0 and (short_score["clamped"] - long_score["clamped"]) < 20.0:
+                is_short_allowed = False
+
+            if is_short_allowed and short_score["clamped"] > long_score["clamped"]:
+                trade_direction = "SHORT"
+                score_dict = short_score
+            else:
+                trade_direction = "LONG"
+                score_dict = long_score
+
+            comp_score = score_dict["clamped"]
+
+            # --- L2 validation (WS cache first, REST fallback) ---
+            if comp_score >= 50.0 or pinned:
+                try:
+                    l2 = ws_memory.get_l2(pid)
+                    if not l2 or not l2.get("bids"):
+                        l2 = await adapter.get_l2_snapshot(pid)
+
+                    last_p = float(feats["last_price"])
+                    bids = l2.get("bids", [])
+                    asks = l2.get("asks", [])
+
+                    feats["l2_buy_vol_2pct"] = sum(
+                        float(b[1]) * float(b[0]) for b in bids if float(b[0]) >= last_p * 0.98
+                    )
+                    feats["l2_bids"] = bids
+                    feats["l2_asks"] = asks
+
+                    # Institutional positioning (funding / open interest)
+                    try:
+                        from tpt.adapters.binance_futures import (
+                            get_open_interest_hist,
+                            get_premium_index,
+                        )
+                        b_sym = pid.split("-")[0] + "USDT"
+                        fr = await get_premium_index(b_sym)
+                        oi = await get_open_interest_hist(b_sym)
+                        if fr:
+                            feats["funding_rate"] = fr.get("funding_rate")
+                        if oi:
+                            feats["oi_change_pct"] = oi.get("oi_change_pct", 0.0)
+                    except Exception as exc:
+                        logger.debug("Futures metrics unavailable for %s: %s", pid, exc)
+
+                    score_dict = score(feats, cfg.scoring, trade_direction=trade_direction, regime=current_regime)
+                    comp_score = score_dict["clamped"]
+                except Exception as exc:
+                    logger.warning("L2 validation failed for %s: %s", pid, exc)
+
+            primary_label = label(
+                feats, comp_score, cfg.labeling,
+                trade_direction=trade_direction,
+                regime=current_regime,
+                btc_beta_state=btc_beta_state,
+            )
+            tags = compute_tags(feats, pinned=pinned)
+            score_dict["tags"] = tags
+
+            ladder_dict = compute_ladder(
+                product_id=pid,
+                features=feats,
+                lbl=primary_label,
+                composite_score=comp_score,
+                config=cfg.ladder,
+                pinned=pinned,
+                trade_direction=trade_direction,
+                regime=current_regime,
+            )
+
+            # Post-ladder validation: ENTRY_ZONE iff price sits within 0.75% of tranche A
+            if ladder_dict and primary_label not in ("SKIP", "CHASE"):
+                t_a = ladder_dict.get("tranche_a_price")
+                current_price = feats.get("last_price")
+                if t_a and current_price:
+                    if abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075:
+                        primary_label = "ENTRY_ZONE"
+                    elif primary_label == "ENTRY_ZONE":
+                        primary_label = "COILED"
+
+            asyncio.create_task(ui_stream.broadcast({
+                "event": "TICKER_SCORED",
+                "product_id": pid,
+                "label": primary_label,
+                "score": round(comp_score, 2),
+                "tags": tags,
+                "ladder": ladder_dict,
+            }))
+
+            # --- Collect rows (written later, in one transaction) ---
+            snapshot_rows.append({
+                "product_id": pid,
+                "raw_stats": json.dumps(st),
+                "raw_ticker": json.dumps(st),
+                "raw_candles_1h": json.dumps(c1h) if c1h else None,
+                "raw_candles_1d": json.dumps(c1d) if c1d else None,
+                "is_stale": 0,
+            })
+
+            feature_rows.append({
+                "product_id": pid,
+                "last_price": feats["last_price"],
+                "day_open": feats["day_open"],
+                "day_high": feats["day_high"],
+                "day_low": feats["day_low"],
+                "day_change_pct": feats["day_change_pct"],
+                "pos_in_range": feats["pos_in_range"],
+                "quote_vol_24h": feats["quote_vol_24h"],
+                "vwap_24h": feats["vwap_24h"],
+                "rsi_1h": feats["rsi_1h"],
+                "rs_vs_btc": feats["rs_vs_btc"],
+                "fib_236": feats["fib_236"],
+                "fib_382": feats["fib_382"],
+                "fib_500": feats["fib_500"],
+                "fib_618": feats["fib_618"],
+                "fib_786": feats["fib_786"],
+                "swing_shelf_7d": feats["swing_shelf_7d"],
+                "swing_high_7d": feats["swing_high_7d"],
+                "vol_7d_avg_usd": feats["vol_7d_avg_usd"],
+            })
+
+            score_rows.append({
+                "product_id": pid,
+                "trade_direction": trade_direction,
+                "composite_score": comp_score,
+                "label": primary_label,
+                "score_breakdown": json.dumps(score_dict),
+            })
+
+            if ladder_dict:
+                ladder_rows.append({
+                    "product_id": pid,
+                    "trade_direction": trade_direction,
+                    "tranche_a_price": ladder_dict["tranche_a_price"],
+                    "tranche_b_price": ladder_dict["tranche_b_price"],
+                    "stop_price": ladder_dict["stop_price"],
+                    "target_1_price": ladder_dict["target_1_price"],
+                    "target_2_price": ladder_dict["target_2_price"],
+                    "tranche_a_size_pct": ladder_dict["tranche_a_size_pct"],
+                    "tranche_b_size_pct": ladder_dict["tranche_b_size_pct"],
+                    "basis": json.dumps(ladder_dict["basis"]),
+                })
+
+            candidates_out.append({
+                "product_id": pid,
+                "last_price": feats["last_price"],
+                "day_change_pct": feats["day_change_pct"],
+                "pos_in_range": feats["pos_in_range"],
+                "quote_vol_24h": feats["quote_vol_24h"],
+                "composite_score": comp_score,
+                "trade_direction": trade_direction,
+                "label": primary_label,
+                "tags": tags,
+                "ladder": ladder_dict,
+                "pinned": pinned,
+            })
+
+            # Queue backtest signal + alert for actionable setups
+            if primary_label in ("ENTRY_ZONE", "COILED") and ladder_dict:
+                san = sanitize_ladder_dict(ladder_dict)
+                if san and san.get("tranche_a_price"):
+                    pending_signals.append((
+                        scan_run_id, pid, comp_score,
+                        json.dumps(score_dict), primary_label, trade_direction,
+                        san["tranche_a_price"],
+                        san["target_1_price"],
+                        san.get("target_2_price") or san["target_1_price"],
+                        san["stop_price"],
+                    ))
+                    telegram_alerts.append({
+                        "symbol": pid,
+                        "score": comp_score,
+                        "label": primary_label,
+                        "entry": san["tranche_a_price"],
+                        "tp": san["target_1_price"],
+                        "sl": san["stop_price"],
+                    })
+
+        # 6. Persist everything in one short critical section.
+        duration = round(time.monotonic() - start_time, 2)
+
         # Kept as separate statements (not combined) so the write-lock scope is
         # explicit at a glance — it is the crux of SQLite write serialization.
         async with db_write_lock:  # noqa: SIM117
             async with AsyncSessionLocal() as db:
-                # --- Symbol catalog upsert ---
+                # --- Symbol catalog upsert (single read, then add/update) ---
+                existing_res = await db.execute(select(Symbol))
+                existing = {s.product_id: s for s in existing_res.scalars().all()}
+                seen_at = utcnow_iso()
                 for p in products:
                     pid = p["id"]
-                    db_sym = await db.get(Symbol, pid)
-                    if db_sym is None:
+                    sym = existing.get(pid)
+                    if sym is None:
                         db.add(Symbol(
                             product_id=pid,
                             base_currency=p.get("base_currency", ""),
@@ -309,254 +545,32 @@ async def _execute_scan(
                             on_watchlist=1 if pid in watchlist_set else 0,
                         ))
                     else:
-                        db_sym.last_seen_at = utcnow_iso()
-                        db_sym.active = 1
+                        sym.last_seen_at = seen_at
+                        sym.active = 1
+                await db.flush()
 
-                # --- BTC market-state gate for macro beta protection ---
-                btc_beta_state = "RANGING"
-                btc_1h = candles_1h_map.get("BTC-USD")
-                if btc_1h and len(btc_1h) >= 20:
-                    b_closes = [float(c[4]) for c in btc_1h if len(c) >= 5]
-                    if len(b_closes) >= 20:
-                        sma_20 = sum(b_closes[-21:-1]) / 20.0
-                        if b_closes[-1] < sma_20 and (btc_day_change or 0.0) < -1.5:
-                            btc_beta_state = "DUMPING"
-                        elif b_closes[-1] > sma_20 and (btc_day_change or 0.0) > 1.5:
-                            btc_beta_state = "PUMPING"
-
-                for pid in product_ids:
-                    if pid in stale_symbols:
-                        db.add(Snapshot(product_id=pid, scan_run_id=scan_run_id, is_stale=1))
-                        continue
-
-                    st = stats_map[pid]
-                    c1h = candles_1h_map.get(pid)
-                    c1d = candles_1d_map.get(pid)
-                    c15m = candles_15m_map.get(pid)
-                    c6h = candles_6h_map.get(pid)
-                    pinned = (pid in watchlist_set)
-
-                    feats = compute_features(
-                        raw_stats=st,
-                        raw_ticker=st,
-                        raw_candles_1h=c1h,
-                        raw_candles_1d=c1d,
-                        btc_day_change_pct=btc_day_change,
-                        raw_candles_15m=c15m,
-                        raw_candles_6h=c6h,
-                    )
-                    feats["product_id"] = pid
-
-                    # Score both directions, then pick the better with a trend constraint
-                    long_score = score(feats, cfg.scoring, trade_direction="LONG", regime=current_regime)
-                    short_score = score(feats, cfg.scoring, trade_direction="SHORT", regime=current_regime)
-
-                    day_chg = float(feats.get("day_change_pct") or 0.0)
-                    is_short_allowed = True
-                    if day_chg > 3.0 and (short_score["clamped"] - long_score["clamped"]) < 20.0:
-                        is_short_allowed = False
-
-                    if is_short_allowed and short_score["clamped"] > long_score["clamped"]:
-                        trade_direction = "SHORT"
-                        score_dict = short_score
-                    else:
-                        trade_direction = "LONG"
-                        score_dict = long_score
-
-                    comp_score = score_dict["clamped"]
-
-                    # --- L2 validation (WS cache first, REST fallback) ---
-                    if comp_score >= 50.0 or pinned:
-                        try:
-                            l2 = ws_memory.get_l2(pid)
-                            if not l2 or not l2.get("bids"):
-                                l2 = await adapter.get_l2_snapshot(pid)
-
-                            last_p = float(feats["last_price"])
-                            bids = l2.get("bids", [])
-                            asks = l2.get("asks", [])
-
-                            feats["l2_buy_vol_2pct"] = sum(
-                                float(b[1]) * float(b[0]) for b in bids if float(b[0]) >= last_p * 0.98
-                            )
-                            feats["l2_bids"] = bids
-                            feats["l2_asks"] = asks
-
-                            # Institutional positioning (funding / open interest)
-                            try:
-                                from tpt.adapters.binance_futures import (
-                                    get_open_interest_hist,
-                                    get_premium_index,
-                                )
-                                b_sym = pid.split("-")[0] + "USDT"
-                                fr = await get_premium_index(b_sym)
-                                oi = await get_open_interest_hist(b_sym)
-                                if fr:
-                                    feats["funding_rate"] = fr.get("funding_rate")
-                                if oi:
-                                    feats["oi_change_pct"] = oi.get("oi_change_pct", 0.0)
-                            except Exception as exc:
-                                logger.debug("Futures metrics unavailable for %s: %s", pid, exc)
-
-                            score_dict = score(feats, cfg.scoring, trade_direction=trade_direction, regime=current_regime)
-                            comp_score = score_dict["clamped"]
-                        except Exception as exc:
-                            logger.warning("L2 validation failed for %s: %s", pid, exc)
-
-                    primary_label = label(
-                        feats, comp_score, cfg.labeling,
-                        trade_direction=trade_direction,
-                        regime=current_regime,
-                        btc_beta_state=btc_beta_state,
-                    )
-                    tags = compute_tags(feats, pinned=pinned)
-                    score_dict["tags"] = tags
-
-                    ladder_dict = compute_ladder(
-                        product_id=pid,
-                        features=feats,
-                        lbl=primary_label,
-                        composite_score=comp_score,
-                        config=cfg.ladder,
-                        pinned=pinned,
-                        trade_direction=trade_direction,
-                        regime=current_regime,
-                    )
-
-                    # Post-ladder validation: ENTRY_ZONE iff price sits within 0.75% of tranche A
-                    if ladder_dict and primary_label not in ("SKIP", "CHASE"):
-                        t_a = ladder_dict.get("tranche_a_price")
-                        current_price = feats.get("last_price")
-                        if t_a and current_price:
-                            if abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075:
-                                primary_label = "ENTRY_ZONE"
-                            elif primary_label == "ENTRY_ZONE":
-                                primary_label = "COILED"
-
-                    asyncio.create_task(ui_stream.broadcast({
-                        "event": "TICKER_SCORED",
-                        "product_id": pid,
-                        "label": primary_label,
-                        "score": round(comp_score, 2),
-                        "tags": tags,
-                        "ladder": ladder_dict,
-                    }))
-
-                    # --- Persist rows ---
-                    db.add(Snapshot(
-                        product_id=pid,
-                        scan_run_id=scan_run_id,
-                        raw_stats=json.dumps(st),
-                        raw_ticker=json.dumps(st),
-                        raw_candles_1h=json.dumps(c1h) if c1h else None,
-                        raw_candles_1d=json.dumps(c1d) if c1d else None,
-                        is_stale=0,
-                    ))
-
-                    db.add(Feature(
-                        product_id=pid,
-                        scan_run_id=scan_run_id,
-                        last_price=feats["last_price"],
-                        day_open=feats["day_open"],
-                        day_high=feats["day_high"],
-                        day_low=feats["day_low"],
-                        day_change_pct=feats["day_change_pct"],
-                        pos_in_range=feats["pos_in_range"],
-                        quote_vol_24h=feats["quote_vol_24h"],
-                        vwap_24h=feats["vwap_24h"],
-                        rsi_1h=feats["rsi_1h"],
-                        rs_vs_btc=feats["rs_vs_btc"],
-                        fib_236=feats["fib_236"],
-                        fib_382=feats["fib_382"],
-                        fib_500=feats["fib_500"],
-                        fib_618=feats["fib_618"],
-                        fib_786=feats["fib_786"],
-                        swing_shelf_7d=feats["swing_shelf_7d"],
-                        swing_high_7d=feats["swing_high_7d"],
-                        vol_7d_avg_usd=feats["vol_7d_avg_usd"],
-                    ))
-
-                    db.add(Score(
-                        product_id=pid,
-                        scan_run_id=scan_run_id,
-                        trade_direction=trade_direction,
-                        composite_score=comp_score,
-                        label=primary_label,
-                        score_breakdown=json.dumps(score_dict),
-                    ))
-
-                    if ladder_dict:
-                        db.add(Ladder(
-                            product_id=pid,
-                            scan_run_id=scan_run_id,
-                            trade_direction=trade_direction,
-                            tranche_a_price=ladder_dict["tranche_a_price"],
-                            tranche_b_price=ladder_dict["tranche_b_price"],
-                            stop_price=ladder_dict["stop_price"],
-                            target_1_price=ladder_dict["target_1_price"],
-                            target_2_price=ladder_dict["target_2_price"],
-                            tranche_a_size_pct=ladder_dict["tranche_a_size_pct"],
-                            tranche_b_size_pct=ladder_dict["tranche_b_size_pct"],
-                            basis=json.dumps(ladder_dict["basis"]),
-                        ))
-
-                    candidates_out.append({
-                        "product_id": pid,
-                        "last_price": feats["last_price"],
-                        "day_change_pct": feats["day_change_pct"],
-                        "pos_in_range": feats["pos_in_range"],
-                        "quote_vol_24h": feats["quote_vol_24h"],
-                        "composite_score": comp_score,
-                        "trade_direction": trade_direction,
-                        "label": primary_label,
-                        "tags": tags,
-                        "ladder": ladder_dict,
-                        "pinned": pinned,
-                    })
-
-                    # Queue backtest signal + alert for actionable setups
-                    if primary_label in ("ENTRY_ZONE", "COILED") and ladder_dict:
-                        san = sanitize_ladder_dict(ladder_dict)
-                        if san and san.get("tranche_a_price"):
-                            pending_signals.append((
-                                scan_run_id, pid, comp_score,
-                                json.dumps(score_dict), primary_label, trade_direction,
-                                san["tranche_a_price"],
-                                san["target_1_price"],
-                                san.get("target_2_price") or san["target_1_price"],
-                                san["stop_price"],
-                            ))
-                            telegram_alerts.append({
-                                "symbol": pid,
-                                "score": comp_score,
-                                "label": primary_label,
-                                "entry": san["tranche_a_price"],
-                                "tp": san["target_1_price"],
-                                "sl": san["stop_price"],
-                            })
+                # --- Bulk insert scan results ---
+                db.add_all([Snapshot(scan_run_id=scan_run_id, **r) for r in snapshot_rows])
+                db.add_all([Feature(scan_run_id=scan_run_id, **r) for r in feature_rows])
+                db.add_all([Score(scan_run_id=scan_run_id, **r) for r in score_rows])
+                db.add_all([Ladder(scan_run_id=scan_run_id, **r) for r in ladder_rows])
 
                 # --- Alerts: zone entry / invalidation + watch lifecycle ---
-                # Persisted in the same transaction as the scan results.
                 try:
-                    from datetime import datetime, timedelta
-
-                    from sqlalchemy import select as _select
-
                     from tpt.alerting.alerter import generate_alerts, persist_alerts
                     from tpt.db.models import Alert, Watch
 
-                    watch_res = await db.execute(_select(Watch).where(Watch.is_active == 1))
+                    watch_res = await db.execute(select(Watch).where(Watch.is_active == 1))
                     active_watches = {
                         (w.product_id, w.zone): {"product_id": w.product_id, "zone": w.zone}
                         for w in watch_res.scalars().all()
                     }
 
                     cutoff = (
-                        datetime.now(UTC)
-                        - timedelta(hours=cfg.alerts.dedupe_hours)
+                        datetime.now(UTC) - timedelta(hours=cfg.alerts.dedupe_hours)
                     ).isoformat()
                     dedupe_res = await db.execute(
-                        _select(Alert.dedupe_key).where(Alert.created_at >= cutoff)
+                        select(Alert.dedupe_key).where(Alert.created_at >= cutoff)
                     )
                     recent_keys = set(dedupe_res.scalars().all())
 
@@ -578,7 +592,6 @@ async def _execute_scan(
                 # feature/score/ladder/snapshot added above.
                 await db.commit()
 
-                duration = round(time.monotonic() - start_time, 2)
                 db_run = await db.get(ScanRun, scan_run_id)
                 if db_run:
                     db_run.status = "DONE"
@@ -589,7 +602,7 @@ async def _execute_scan(
                     db_run.candidates_count = len(candidates_out)
                     await db.commit()
 
-        # Signals + alerts outside the ORM transaction (own connections)
+        # Signals + Telegram run outside the ORM transaction (own connections).
         await _persist_pending_signals(pending_signals)
 
         for alert in telegram_alerts:
@@ -615,7 +628,7 @@ async def _execute_scan(
             except Exception as exc:
                 logger.warning("Live L2 buffer management failed: %s", exc)
         else:
-            logger.info("Live L2 buffer disabled; scanner uses REST order-book snapshots.")
+            logger.debug("Live L2 buffer disabled; scanner uses REST order-book snapshots.")
 
         if own_adapter:
             await adapter.close()
