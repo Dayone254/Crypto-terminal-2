@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "F:\Crypto terminal 2\backend\tpt\scanner\runner.py", line 346, in run_scan
+    ladder_dict = compute_ladder(
+                  ^^^^^^^^^^^^^^^
+  File "F:\Crypto terminal 2\backend\tpt\engine\ladder.py", line 175, in compute_ladder
+    walls_b = [(float(p), float(s)) for p, s, _ in l2_bids if lb_stop <= float(p) <= ub_stop]
+                                        ^^^^^^^
+ValueError: not enough values to unpack (expected 3, got 2)

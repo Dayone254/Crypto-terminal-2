@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "F:\Crypto terminal 2\backend\tpt\scanner\runner.py", line 346, in run_scan
+    ladder_dict = compute_ladder(
+                  ^^^^^^^^^^^^^^^
+  File "F:\Crypto terminal 2\backend\tpt\engine\ladder.py", line 103, in compute_ladder
+    walls_b = [(float(p), float(s)) for p, s, _ in l2_asks if lb_stop <= float(p) <= ub_stop]
+                                        ^^^^^^^
+ValueError: not enough values to unpack (expected 3, got 2)
+Triggering standalone scan...
+>>> [DEBUG] adapter.get_products() returned 402 products
+>>> [DEBUG] product_ids length is 402
+>>> STATUS: FAILED
+>>> ERROR: not enough values to unpack (expected 3, got 2)
+>>> FETCHED: 0
+>>> STALE: 0
+>>> CANDIDATES: 0

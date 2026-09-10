@@ -1,0 +1,32 @@
+{
+    "description": "DASH-USD real session snapshot — day-high blowoff (+18.5%, pos_in_range 0.92). Labeled CHASE, no ladder generated.",
+    "product_id": "DASH-USD",
+    "pinned": false,
+    "stats": {
+        "open": "24.00",
+        "high": "28.80",
+        "low": "23.50",
+        "last": "28.44",
+        "volume": "350000"
+    },
+    "ticker": {
+        "price": "28.44",
+        "bid": "28.40",
+        "ask": "28.48",
+        "volume": "350000",
+        "time": "2026-09-05T14:20:00Z"
+    },
+    "expected": {
+        "quote_vol_24h": 9954000.0,
+        "day_change_pct": 18.50,
+        "pos_in_range": 0.932,
+        "primary_label": "CHASE",
+        "tags": [
+            "OVERBOUGHT_1H"
+        ],
+        "composite_score_max": 35,
+        "ladder": null,
+        "alert_expected": false,
+        "alert_reason": "CHASE label suppresses ladder generation and entry alerts."
+    }
+}

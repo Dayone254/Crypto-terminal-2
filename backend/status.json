@@ -1,0 +1,11 @@
+{
+  "status": "FAILED",
+  "scan_run_id": "621726ab-fdd5-4cda-9c9c-bf732f8cec87",
+  "trigger": "ON_DEMAND",
+  "started_at": "2026-09-08T22:01:25.615945+03:00",
+  "completed_at": "2026-09-08T22:09:06.95942+03:00",
+  "duration_seconds": 463.8,
+  "symbols_fetched": null,
+  "symbols_stale": null,
+  "candidates_count": null
+}

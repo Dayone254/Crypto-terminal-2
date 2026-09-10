@@ -1,0 +1,38 @@
+{
+    "description": "NEAR-USD real session snapshot — price ~$2.22 above Tranche A ($2.05). Labeled WATCH, no entry alert until retrace.",
+    "product_id": "NEAR-USD",
+    "pinned": true,
+    "stats": {
+        "open": "2.10",
+        "high": "2.35",
+        "low": "2.02",
+        "last": "2.22",
+        "volume": "8500000"
+    },
+    "ticker": {
+        "price": "2.22",
+        "bid": "2.219",
+        "ask": "2.221",
+        "volume": "8500000",
+        "time": "2026-09-05T12:00:00Z"
+    },
+    "expected": {
+        "quote_vol_24h": 18870000.0,
+        "day_change_pct": 5.71,
+        "pos_in_range": 0.606,
+        "primary_label": "WATCH",
+        "tags": [
+            "PINNED"
+        ],
+        "composite_score_min": 55,
+        "ladder": {
+            "tranche_a": 2.05,
+            "tranche_b": 1.95,
+            "stop": 1.89,
+            "target_1": 2.33,
+            "target_2": 2.46
+        },
+        "alert_expected": false,
+        "alert_reason": "Price is 8.2% above Tranche A ($2.05). No entry alert until retrace."
+    }
+}

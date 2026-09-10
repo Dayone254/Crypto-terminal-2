@@ -1,0 +1,6 @@
+Total signals in DB: 98
+Found 3 signals with R:R < 1.8:
+
+ID 1   | BONK-USD   (LONG ) | Entry: 3e-06      | TP: 3e-06      | SL: 3e-06      | R:R: 0R | Status: LOSS
+ID 32  | BONK-USD   (LONG ) | Entry: 3e-06      | TP: 3e-06      | SL: 3e-06      | R:R: 0R | Status: LOSS
+ID 171 | PEPE-USD   (SHORT) | Entry: 4e-06      | TP: 4e-06      | SL: 4e-06      | R:R: 0R | Status: PENDING

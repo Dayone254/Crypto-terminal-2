@@ -1,0 +1,11 @@
+{
+  "status": "RUNNING",
+  "scan_run_id": "2df4d3d3-ce6f-4c10-bbe3-4fd3769bdfce",
+  "trigger": "ON_DEMAND",
+  "started_at": "2026-09-08T22:11:40.357605+03:00",
+  "completed_at": null,
+  "duration_seconds": null,
+  "symbols_fetched": null,
+  "symbols_stale": null,
+  "candidates_count": null
+}

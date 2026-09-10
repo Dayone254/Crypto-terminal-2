@@ -1,0 +1,32 @@
+[
+  {
+    "id": "fd7f5d14-d4cd-41ad-9eb0-b6d157ee81e7",
+    "status": "FAILED",
+    "cands": null,
+    "error": "database is locked"
+  },
+  {
+    "id": "fc75cd09-e4e9-4f28-9d41-1b8733134f8e",
+    "status": "FAILED",
+    "cands": null,
+    "error": "Server restarted during scan."
+  },
+  {
+    "id": "faf6dd3d-0d13-4b7a-84f6-9623e501dfd2",
+    "status": "DONE",
+    "cands": 2,
+    "error": null
+  },
+  {
+    "id": "fa658830-319e-45e5-abe2-11d9060995c6",
+    "status": "DONE",
+    "cands": 402,
+    "error": null
+  },
+  {
+    "id": "fa13dd6b-0339-4ad1-9904-08e53df9eff2",
+    "status": "FAILED",
+    "cands": null,
+    "error": "threads can only be started once"
+  }
+]

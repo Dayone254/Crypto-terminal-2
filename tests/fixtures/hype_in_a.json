@@ -1,0 +1,40 @@
+{
+    "description": "HYPE-USD real session snapshot — coiled impulse retrace in Tranche A (~$84.7). Must alert and output ladder.",
+    "product_id": "HYPE-USD",
+    "pinned": true,
+    "stats": {
+        "open": "81.20",
+        "high": "92.50",
+        "low": "79.80",
+        "last": "84.70",
+        "volume": "450000"
+    },
+    "ticker": {
+        "price": "84.70",
+        "bid": "84.65",
+        "ask": "84.75",
+        "volume": "450000",
+        "time": "2026-09-05T11:30:00Z"
+    },
+    "expected": {
+        "quote_vol_24h": 38115000.0,
+        "day_change_pct": 4.31,
+        "pos_in_range": 0.385,
+        "primary_label": "ENTRY_ZONE",
+        "tags": [
+            "VWAP_CONFLUENCE",
+            "COILED_STRUCTURE",
+            "PINNED"
+        ],
+        "composite_score_min": 70,
+        "ladder": {
+            "tranche_a": 84.70,
+            "tranche_b": 81.20,
+            "stop": 78.76,
+            "target_1": 92.03,
+            "target_2": 97.10
+        },
+        "alert_expected": true,
+        "alert_type": "ZONE_A_ENTRY"
+    }
+}

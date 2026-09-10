@@ -1,0 +1,4 @@
+  File "<string>", line 1
+    import asyncio, traceback, sys; from tpt.scanner.runner import run_scan; async def a(): r=await run_scan(); print('ERROR', r.error_message); asyncio.run(a())
+                                                                             ^^^^^
+SyntaxError: invalid syntax

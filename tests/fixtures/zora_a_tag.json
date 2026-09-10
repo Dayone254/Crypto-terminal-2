@@ -1,0 +1,40 @@
+{
+    "description": "ZORA-USD real session snapshot — price inside Tranche A zone ($0.00846–$0.00858). Must alert once.",
+    "product_id": "ZORA-USD",
+    "pinned": true,
+    "stats": {
+        "open": "0.00810",
+        "high": "0.00995",
+        "low": "0.00760",
+        "last": "0.00852",
+        "volume": "1200000000"
+    },
+    "ticker": {
+        "price": "0.00852",
+        "bid": "0.00851",
+        "ask": "0.00853",
+        "volume": "1200000000",
+        "time": "2026-09-05T09:14:00Z"
+    },
+    "expected": {
+        "quote_vol_24h": 10224000.0,
+        "day_change_pct": 5.185,
+        "pos_in_range": 0.391,
+        "primary_label": "ENTRY_ZONE",
+        "tags": [
+            "VWAP_CONFLUENCE",
+            "FIB50_TOUCH",
+            "PINNED"
+        ],
+        "composite_score_min": 65,
+        "ladder": {
+            "tranche_a": 0.00846,
+            "tranche_b": 0.00790,
+            "stop": 0.00766,
+            "target_1": 0.00990,
+            "target_2": 0.01140
+        },
+        "alert_expected": true,
+        "alert_type": "ZONE_A_ENTRY"
+    }
+}

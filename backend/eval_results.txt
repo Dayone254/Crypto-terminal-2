@@ -1,0 +1,28 @@
+Total signals evaluated: 54
+  ✓ WIN: 22
+  ✗ LOSS: 0
+  ⏳ PENDING: 32
+
+--- CLOSED TRADES (LEGITIMATELY EVALUATED POST-SIGNAL) ---
+ID 184 | DOOD-USD   (LONG ) | Status: WIN  | Created: 2026-09-07 18:35 | Fill: 2026-09-07 18:35 (at $0.001753) | Closed: 2026-09-07 18:45 | MFE: +9.64% | MAE: 0.00%
+ID 174 | LINK-USD   (LONG ) | Status: WIN  | Created: 2026-09-07 18:33 | Fill: 2026-09-07 18:33 (at $11.806173) | Closed: 2026-09-07 18:45 | MFE: +8.12% | MAE: 0.00%
+ID 171 | PEPE-USD   (SHORT) | Status: WIN  | Created: 2026-09-07 18:32 | Fill: 2026-09-07 18:32 (at $4e-06) | Closed: 2026-09-07 18:45 | MFE: +10.25% | MAE: 0.00%
+ID 167 | APT-USD    (LONG ) | Status: WIN  | Created: 2026-09-07 18:31 | Fill: 2026-09-07 18:31 (at $0.574188) | Closed: 2026-09-07 18:45 | MFE: +10.78% | MAE: 0.00%
+ID 162 | USELESS-USD (SHORT) | Status: WIN  | Created: 2026-09-07 18:31 | Fill: 2026-09-07 18:31 (at $0.245675) | Closed: 2026-09-07 18:45 | MFE: +7.53% | MAE: 0.00%
+ID 157 | ATOM-USD   (LONG ) | Status: WIN  | Created: 2026-09-07 18:30 | Fill: 2026-09-07 18:30 (at $1.516329) | Closed: 2026-09-07 18:45 | MFE: +9.01% | MAE: 0.00%
+ID 155 | SUI-USD    (LONG ) | Status: WIN  | Created: 2026-09-07 18:30 | Fill: 2026-09-07 18:30 (at $0.758528) | Closed: 2026-09-07 18:45 | MFE: +9.15% | MAE: 0.00%
+ID 108 | ZEC-USD    (LONG ) | Status: WIN  | Created: 2026-09-07 08:11 | Fill: 2026-09-07 08:11 (at $932.201012) | Closed: 2026-09-07 08:15 | MFE: +27.00% | MAE: 0.00%
+ID 106 | UNI-USD    (LONG ) | Status: WIN  | Created: 2026-09-07 07:58 | Fill: 2026-09-07 07:58 (at $5.770985) | Closed: 2026-09-07 08:00 | MFE: +23.72% | MAE: 0.00%
+ID 63  | CRV-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:55 | Fill: 2026-09-06 08:55 (at $0.343012) | Closed: 2026-09-06 09:00 | MFE: +8.68% | MAE: 0.00%
+ID 59  | CHIP-USD   (LONG ) | Status: WIN  | Created: 2026-09-06 08:20 | Fill: 2026-09-06 08:20 (at $0.045251) | Closed: 2026-09-06 08:30 | MFE: +31.73% | MAE: 0.00%
+ID 57  | LTC-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:20 | Fill: 2026-09-06 08:20 (at $50.33823) | Closed: 2026-09-06 08:30 | MFE: +7.71% | MAE: 0.00%
+ID 56  | FIL-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:20 | Fill: 2026-09-06 08:20 (at $0.741001) | Closed: 2026-09-06 08:30 | MFE: +8.02% | MAE: 0.00%
+ID 52  | WLD-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:20 | Fill: 2026-09-06 08:20 (at $0.385162) | Closed: 2026-09-06 09:15 | MFE: +6.42% | MAE: 0.00%
+ID 51  | COTI-USD   (LONG ) | Status: WIN  | Created: 2026-09-06 08:20 | Fill: 2026-09-06 08:20 (at $0.013641) | Closed: 2026-09-06 08:30 | MFE: +20.17% | MAE: 0.00%
+ID 49  | NOM-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $0.001857) | Closed: 2026-09-06 08:30 | MFE: +8.52% | MAE: -6.84%
+ID 44  | DASH-USD   (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $55.137977) | Closed: 2026-09-06 08:30 | MFE: +24.58% | MAE: 0.00%
+ID 41  | SUSHI-USD  (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $0.22623) | Closed: 2026-09-06 09:00 | MFE: +7.06% | MAE: 0.00%
+ID 38  | FET-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $0.158398) | Closed: 2026-09-06 09:00 | MFE: +6.04% | MAE: 0.00%
+ID 36  | ZEN-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $6.292204) | Closed: 2026-09-06 08:30 | MFE: +15.38% | MAE: 0.00%
+ID 33  | ICP-USD    (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $2.465606) | Closed: 2026-09-06 08:30 | MFE: +8.13% | MAE: 0.00%
+ID 32  | BONK-USD   (LONG ) | Status: WIN  | Created: 2026-09-06 08:19 | Fill: 2026-09-06 08:19 (at $3e-06) | Closed: 2026-09-06 08:30 | MFE: +8.67% | MAE: 0.00%
