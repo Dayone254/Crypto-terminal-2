@@ -484,6 +484,8 @@ export const NativeChart: React.FC<NativeChartProps> = ({
         let ws: WebSocket;
         let wsL2: WebSocket;
         let disposed = false;
+        /** Set when the server says live streaming is off, so onclose does not reconnect. */
+        let liveDisabled = false;
         let interval: any;
         let lastL2Render = 0;
 
@@ -504,6 +506,12 @@ export const NativeChart: React.FC<NativeChartProps> = ({
 
                 try {
                     const l2Data = JSON.parse(e.data);
+                    // Server-side notice that live streaming is disabled — not a book.
+                    if (l2Data && (l2Data.type === "ws_disabled" || l2Data.error === "live_ws_disabled")) {
+                        liveDisabled = true;
+                        setIsLive(false);
+                        return;
+                    }
                     if (chartInstance.current && l2Data.metrics) {
                         lastL2Render = nowMs;
                         chartInstance.current.removeOverlay({ name: "l2HeatmapBar" });
@@ -537,6 +545,12 @@ export const NativeChart: React.FC<NativeChartProps> = ({
                 if (disposed) return;
                 try {
                     const tick = JSON.parse(e.data);
+                    // Server-side notice that live streaming is disabled — not a tick.
+                    if (tick && (tick.type === "ws_disabled" || tick.error === "live_ws_disabled")) {
+                        liveDisabled = true;
+                        setIsLive(false);
+                        return;
+                    }
                     if (!tick.price) return;
 
                     const priceNum = Number(tick.price);
@@ -576,6 +590,8 @@ export const NativeChart: React.FC<NativeChartProps> = ({
             ws.onclose = () => {
                 setIsLive(false);
                 clearInterval(interval);
+                // The stream closed because live streaming is off — don't loop.
+                if (liveDisabled) return;
                 if (!disposed) setTimeout(connect, 3000);
             };
         };

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TPT — Decision Pipeline Audit</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font-family: inherit;
+    color: var(--foreground, #e6edf3);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .wrap { display: flex; flex-direction: column; gap: 18px; width: 100%; }
+
+  .hdr { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .hdr h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: .01em; }
+  .hdr .meta { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; color: var(--muted-foreground, #94a3b8); }
+
+  .card {
+    background: var(--card, rgba(255,255,255,.03));
+    border: 1px solid var(--border, rgba(255,255,255,.08));
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted-foreground, #94a3b8);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .sub { font-size: 11px; color: var(--muted-foreground, #94a3b8); margin: -4px 0 10px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+  /* ── funnel ── */
+  .row { display: grid; grid-template-columns: 140px 1fr 96px; align-items: center; gap: 10px; margin-bottom: 7px; }
+  .row .lbl { font-size: 11.5px; color: var(--foreground, #e6edf3); }
+  .row .val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; text-align: right; color: var(--muted-foreground, #94a3b8); white-space: nowrap; }
+  .track { height: 20px; background: color-mix(in srgb, var(--foreground, #e6edf3) 7%, transparent); border-radius: 4px; overflow: hidden; position: relative; }
+  .fill { height: 100%; border-radius: 4px; transition: width .5s ease; }
+  .drop { font-size: 10px; color: #f59e0b; margin: -3px 0 7px 150px; font-family: ui-monospace, monospace; }
+  .crit { color: #f43f5e; }
+
+  /* ── stacked bars / chips ── */
+  .stack { display: flex; height: 22px; border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
+  .seg { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #04070d; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 10.5px; color: var(--muted-foreground, #94a3b8); }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th { text-align: left; font-weight: 600; color: var(--muted-foreground, #94a3b8); padding: 4px 6px; border-bottom: 1px solid var(--border, rgba(255,255,255,.08)); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+  td { padding: 4px 6px; border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(255,255,255,.08)) 60%, transparent); }
+  td.n { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+  tr:last-child td { border-bottom: none; }
+
+  /* ── histogram ── */
+  .hist { display: flex; align-items: flex-end; gap: 6px; height: 130px; margin-bottom: 6px; }
+  .hbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; height: 100%; }
+  .hbar .b { width: 100%; border-radius: 3px 3px 0 0; background: var(--accent, #06b6d4); position: relative; }
+  .hbar .c { font-family: ui-monospace, monospace; font-size: 10px; color: var(--muted-foreground, #94a3b8); }
+  .hbar .x { font-size: 10px; color: var(--muted-foreground, #94a3b8); }
+
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  @media (max-width: 720px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  .kpi { background: color-mix(in srgb, var(--foreground, #e6edf3) 5%, transparent); border-radius: 8px; padding: 9px 11px; }
+  .kpi .k { font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground, #94a3b8); }
+  .kpi .v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 19px; font-weight: 700; margin-top: 2px; }
+  .kpi .s { font-size: 10px; color: var(--muted-foreground, #94a3b8); }
+
+  /* ── findings ── */
+  .find { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(255,255,255,.08)) 60%, transparent); }
+  .find:last-child { border-bottom: none; }
+  .sev { flex: 0 0 auto; font-size: 9px; font-weight: 800; letter-spacing: .05em; padding: 2px 7px; border-radius: 4px; height: fit-content; margin-top: 1px; }
+  .sev.crit { background: rgba(244,63,94,.18); color: #f43f5e; }
+  .sev.high { background: rgba(245,158,11,.18); color: #f59e0b; }
+  .sev.med  { background: color-mix(in srgb, var(--accent,#06b6d4) 18%, transparent); color: var(--accent, #06b6d4); }
+  .find .body strong { font-weight: 700; }
+  .find .body code { font-family: ui-monospace, monospace; font-size: 10.5px; background: color-mix(in srgb, var(--foreground,#e6edf3) 8%, transparent); padding: 1px 4px; border-radius: 3px; }
+  .find .body { font-size: 11.5px; }
+  .find .body .fix { color: var(--muted-foreground, #94a3b8); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  button.act {
+    font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+    background: color-mix(in srgb, var(--accent, #06b6d4) 14%, transparent);
+    color: var(--accent, #06b6d4);
+    border: 1px solid color-mix(in srgb, var(--accent, #06b6d4) 35%, transparent);
+    border-radius: 7px; padding: 6px 11px;
+  }
+  button.act:hover { background: color-mix(in srgb, var(--accent, #06b6d4) 24%, transparent); }
+  .foot { font-size: 10.5px; color: var(--muted-foreground, #94a3b8); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hdr">
+    <h1>Decision Pipeline Audit — “the brain”</h1>
+    <div class="meta">scan 330ecd10 · 402 symbols · 149 scans lifetime</div>
+  </div>
+
+  <!-- KPI strip -->
+  <div class="kpis">
+    <div class="kpi"><div class="k">Candle coverage</div><div class="v" style="color:#f43f5e">8.5%</div><div class="s">34 / 402 symbols</div></div>
+    <div class="kpi"><div class="k">Ladder conversion</div><div class="v" style="color:#f59e0b">2.5%</div><div class="s">10 / 402 symbols</div></div>
+    <div class="kpi"><div class="k">Closed win rate</div><div class="v" style="color:#f43f5e">0%</div><div class="s">0 W / 9 L / 3 BE</div></div>
+    <div class="kpi"><div class="k">Signal → fill</div><div class="v">53%</div><div class="s">16 / 30 filled</div></div>
+  </div>
+
+  <!-- FUNNEL -->
+  <div class="card">
+    <h2>The ingestion → plan funnel</h2>
+    <div class="sub">Where the brain loses information. Everything below “candles” is a dramatic drop.</div>
+
+    <div class="row"><div class="lbl">Products ingested</div><div class="track"><div class="fill" style="width:100%;background:var(--accent,#06b6d4)"></div></div><div class="val">402 · 100%</div></div>
+    <div class="row"><div class="lbl">Snapshots written</div><div class="track"><div class="fill" style="width:100%;background:var(--accent,#06b6d4)"></div></div><div class="val">402 · 100%</div></div>
+    <div class="row"><div class="lbl">…with candle data</div><div class="track"><div class="fill" style="width:8.5%;background:#f43f5e"></div></div><div class="val">34 · 8.5%</div></div>
+    <div class="drop crit">▼ 368 symbols (91.5%) get NO RSI · MACD · Bollinger · ATR · VWAP · swings</div>
+    <div class="row"><div class="lbl">Features computed</div><div class="track"><div class="fill" style="width:100%;background:var(--accent,#06b6d4)"></div></div><div class="val">402 · 100%</div></div>
+    <div class="row"><div class="lbl">…with real 1h RSI</div><div class="track"><div class="fill" style="width:8.5%;background:#f43f5e"></div></div><div class="val">34 · 8.5%</div></div>
+    <div class="row"><div class="lbl">Scores produced</div><div class="track"><div class="fill" style="width:100%;background:var(--accent,#06b6d4)"></div></div><div class="val">402 · 100%</div></div>
+    <div class="row"><div class="lbl">Trade plans (ladders)</div><div class="track"><div class="fill" style="width:2.5%;background:#f59e0b"></div></div><div class="val">10 · 2.5%</div></div>
+    <div class="drop">▼ R/R ≥ 1.85 floor + label gate removes 392</div>
+    <div class="row"><div class="lbl">Backtest signals</div><div class="track"><div class="fill" style="width:7.5%;background:#f59e0b"></div></div><div class="val">30</div></div>
+    <div class="row"><div class="lbl">Filled</div><div class="track"><div class="fill" style="width:4%;background:#f59e0b"></div></div><div class="val">16</div></div>
+    <div class="row"><div class="lbl">Closed</div><div class="track"><div class="fill" style="width:3%;background:#f59e0b"></div></div><div class="val">12</div></div>
+    <div class="row"><div class="lbl">Wins</div><div class="track"><div class="fill" style="width:0.4%;background:#f43f5e"></div></div><div class="val">0</div></div>
+  </div>
+
+  <div class="grid2">
+    <!-- DIRECTION -->
+    <div class="card">
+      <h2>Direction selection</h2>
+      <div class="stack">
+        <div class="seg" style="width:86.6%;background:#f43f5e">SHORT 348</div>
+        <div class="seg" style="width:13.4%;background:#10b981">54</div>
+      </div>
+      <div class="legend"><span><i style="background:#f43f5e"></i>SHORT 86.6%</span><span><i style="background:#10b981"></i>LONG 13.4%</span></div>
+      <div class="sub" style="margin-top:10px">
+        Every <em>actionable</em> label was LONG-free in this scan — WATCH 51/51, CHASE 6/6, EARLY 5/5, COILED 3/3, ENTRY_ZONE 1/1 all SHORT.
+        All 54 LONGs were labelled SKIP.
+      </div>
+    </div>
+
+    <!-- LABELS -->
+    <div class="card">
+      <h2>Label distribution</h2>
+      <table>
+        <tr><th>Label</th><th style="text-align:right">n</th><th style="text-align:right">share</th><th style="text-align:right">ladder?</th></tr>
+        <tr><td>SKIP</td><td class="n">336</td><td class="n">83.6%</td><td class="n">0</td></tr>
+        <tr><td>WATCH</td><td class="n">51</td><td class="n">12.7%</td><td class="n">2</td></tr>
+        <tr><td>CHASE</td><td class="n">6</td><td class="n">1.5%</td><td class="n">0</td></tr>
+        <tr><td>EARLY</td><td class="n">5</td><td class="n">1.2%</td><td class="n">5</td></tr>
+        <tr><td>COILED</td><td class="n">3</td><td class="n">0.7%</td><td class="n">3</td></tr>
+        <tr><td>ENTRY_ZONE</td><td class="n">1</td><td class="n">0.2%</td><td class="n" style="color:#f43f5e">0</td></tr>
+      </table>
+      <div class="sub" style="margin-top:9px">
+        <span class="crit">ENTRY_ZONE scored but produced no plan</span> — a labelled entry with no ladder is an inconsistent state.
+      </div>
+    </div>
+  </div>
+
+  <!-- SCORE vs LABEL -->
+  <div class="card">
+    <h2>Score distribution vs. what actually got labelled</h2>
+    <div class="sub">Score and label disagree systematically: 256 symbols (63.7%) score ≥ 70, yet 336 (83.6%) are labelled SKIP.</div>
+    <div class="hist">
+      <div class="hbar"><div class="c">40</div><div class="b" style="height:26%"></div><div class="x">40s</div></div>
+      <div class="hbar"><div class="c">67</div><div class="b" style="height:44%"></div><div class="x">50s</div></div>
+      <div class="hbar"><div class="c">39</div><div class="b" style="height:26%"></div><div class="x">60s</div></div>
+      <div class="hbar"><div class="c">125</div><div class="b" style="height:82%"></div><div class="x">70s</div></div>
+      <div class="hbar"><div class="c">128</div><div class="b" style="height:84%"></div><div class="x">80s</div></div>
+      <div class="hbar"><div class="c">3</div><div class="b" style="height:4%"></div><div class="x">90s</div></div>
+    </div>
+    <div class="foot">Composite score by 10-point band (n = 402). The mass sits at 70–89 while the label gate rejects on volume — so “score” on the dashboard reads high on symbols the brain refuses to trade.</div>
+  </div>
+
+  <div class="grid2">
+    <!-- OUTCOMES -->
+    <div class="card">
+      <h2>Outcome ledger</h2>
+      <div class="stack">
+        <div class="seg" style="width:0%;background:#10b981"></div>
+        <div class="seg" style="width:50%;background:#f43f5e">9 LOSS (75%)</div>
+        <div class="seg" style="width:25%;background:#94a3b8">3 BE</div>
+        <div class="seg" style="width:25%;background:color-mix(in srgb,var(--foreground,#e6edf3) 18%,transparent);color:var(--muted-foreground,#94a3b8)">0 WIN</div>
+      </div>
+      <table style="margin-top:8px">
+        <tr><th>Cohort</th><th style="text-align:right">n</th><th style="text-align:right">W</th><th style="text-align:right">L</th><th style="text-align:right">pend</th><th style="text-align:right">avg score</th></tr>
+        <tr><td>ENTRY_ZONE · LONG</td><td class="n">14</td><td class="n" style="color:#10b981">0</td><td class="n" style="color:#f43f5e">8</td><td class="n">4</td><td class="n" style="color:#f43f5e">31.9</td></tr>
+        <tr><td>COILED · SHORT</td><td class="n">10</td><td class="n">0</td><td class="n">0</td><td class="n">10</td><td class="n">72.1</td></tr>
+        <tr><td>COILED · LONG</td><td class="n">6</td><td class="n">0</td><td class="n">1</td><td class="n">4</td><td class="n">74.2</td></tr>
+      </table>
+      <div class="foot" style="margin-top:9px">
+        The losing cohort is <strong>ENTRY_ZONE</strong> — signals whose entry gate was bypassed. Their scores were
+        <code>1.9</code>, <code>4.9</code>, <code>7.16</code>, <code>12.33</code> against a configured minimum of 60.
+      </div>
+    </div>
+
+    <!-- MFE / MAE -->
+    <div class="card">
+      <h2>Excursion by conviction band</h2>
+      <div class="sub">Average best-case (MFE) vs worst-case (MAE) move, % — losses ran ~3–5× further than gains.</div>
+      <table>
+        <tr><th>Score band</th><th style="text-align:right">n</th><th style="text-align:right">avg MFE</th><th style="text-align:right">avg MAE</th></tr>
+        <tr><td>0–19</td><td class="n">6</td><td class="n" style="color:#10b981">+0.67</td><td class="n" style="color:#f43f5e">−3.84</td></tr>
+        <tr><td>20–29</td><td class="n">3</td><td class="n" style="color:#10b981">+0.76</td><td class="n" style="color:#f43f5e">−4.59</td></tr>
+        <tr><td>50–59</td><td class="n">3</td><td class="n">—</td><td class="n">—</td></tr>
+        <tr><td>60–69</td><td class="n">3</td><td class="n" style="color:#10b981">+0.89</td><td class="n" style="color:#f43f5e">−1.05</td></tr>
+        <tr><td>70–79</td><td class="n">9</td><td class="n" style="color:#10b981">+1.33</td><td class="n" style="color:#f43f5e">−2.46</td></tr>
+        <tr><td>80–99</td><td class="n">6</td><td class="n">—</td><td class="n">—</td></tr>
+      </table>
+      <div class="foot" style="margin-top:9px">
+        Every signal carries a target of exactly <code>2.0R</code> — the floor, never above. The wall-interception and
+        gamma-capping logic is not improving reward anywhere.
+      </div>
+    </div>
+  </div>
+
+  <!-- FINDINGS -->
+  <div class="card">
+    <h2>Findings, in priority order</h2>
+
+    <div class="find">
+      <span class="sev crit">CRITICAL</span>
+      <div class="body">
+        <strong>91.5% of symbols are scored blind.</strong> Only 34 of 402 pass the candle pre-filter, so 368 symbols
+        feed the scorer <code>rsi_1h=None → 50</code>, no Bollinger, no MACD, no VWAP, no swings. Their score is
+        effectively <em>day-change + relative-strength + volume</em> only.<br>
+        <span class="fix">Fix: fetch candles for every symbol that passes the volume gate (the pre-filter exists to save requests, but it is rejecting the very inputs the scorer needs).</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev crit">CRITICAL</span>
+      <div class="body">
+        <strong>ENTRY_ZONE is assigned with the score gate bypassed.</strong> The post-ladder rule relabels anything
+        priced within 0.75% of tranche A as <code>ENTRY_ZONE</code> — regardless of score. That is exactly the cohort
+        that lost: 8 losses, 0 wins, average score <strong>31.9</strong> (minimum configured: 60).<br>
+        <span class="fix">Fix: require <code>score ≥ entry_zone_score_min</code> in the override, not just price proximity.</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev high">HIGH</span>
+      <div class="body">
+        <strong>Score and label contradict each other.</strong> 63.7% score ≥ 70 while 83.6% are labelled SKIP. On the
+        dashboard, “score” therefore reads as high conviction on symbols the brain refuses to plan.<br>
+        <span class="fix">Fix: surface the binding constraint (volume / chase / no-ladder) next to the score.</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev high">HIGH</span>
+      <div class="body">
+        <strong>The learning loop is switched off.</strong> <code>component_feedback</code> has <strong>0 rows</strong> —
+        <code>engine/feedback.py</code> is never called, so no outcome ever adjusts a component weight. The brain does
+        not learn from its 9 losses.<br>
+        <span class="fix">Fix: run feedback after each evaluator pass and feed hit-rates back into the weights.</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev high">HIGH</span>
+      <div class="body">
+        <strong>Direction is effectively one-way.</strong> 86.6% SHORT, and all actionable labels SHORT. With RSI
+        defaulted to 50 for 92% of symbols, direction is decided almost entirely by <code>day_change</code> and
+        <code>rs_vs_btc</code> — in a broadly red market that mechanically selects SHORT everywhere.<br>
+        <span class="fix">Fix: restore candle inputs (above) and re-check the LONG/SHORT picker once RSI/MACD are real.</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev med">MEDIUM</span>
+      <div class="body">
+        <strong>Reward is degenerate at 2.0R.</strong> Every ladder lands exactly on the minimum R/R floor, so the
+        L2-wall front-running and gamma-wall capping are not adding reward.<br>
+        <span class="fix">Fix: verify target-1 interception is actually firing (needs L2 data, which needs candles).</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev med">MEDIUM</span>
+      <div class="body">
+        <strong>Nonsensical price data in the ledger.</strong> <code>PAXG-USD</code> (gold, ~$4,000) has an entry of
+        exactly <code>$10.00</code>, TP <code>$12.00</code>, SL <code>$8.00</code> — a placeholder, not a level.<br>
+        <span class="fix">Fix: validate ladder prices against spot before persisting a signal.</span>
+      </div>
+    </div>
+
+    <div class="find">
+      <span class="sev med">MEDIUM</span>
+      <div class="body">
+        <strong>48% of all scan runs failed historically</strong> (72 FAILED / 149 total). The commit and lock fixes
+        address the cause — worth watching that this ratio drops.<br>
+        <span class="fix">Fix: already applied; monitor.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Dig deeper</h2>
+    <div class="actions">
+      <button class="act" data-hermes-send="Fix the candle coverage: 91.5% of symbols are scored with no candle-derived features. Change the scanner so every symbol passing the volume gate gets candles, then show me the new coverage numbers.">Fix candle coverage</button>
+      <button class="act" data-hermes-send="Fix the ENTRY_ZONE label override so it requires score >= entry_zone_score_min, not just price proximity to tranche A. Then re-run and show the new cohort.">Fix ENTRY_ZONE gate</button>
+      <button class="act" data-hermes-send="Wire engine/feedback.py into the pipeline so component_feedback is populated from closed trades, and show which components actually correlate with wins.">Turn the learning loop on</button>
+      <button class="act" data-hermes-send="Audit the LONG vs SHORT direction picker: 86.6% of symbols selected SHORT. Explain why and propose a fix.">Audit direction bias</button>
+    </div>
+  </div>
+
+  <div class="foot">Snapshot of scan <code>330ecd10</code>. Figures read directly from the live SQLite database — no estimates.</div>
+
+</div>
+<script>
+  document.querySelectorAll('[data-hermes-send]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      var msg = el.getAttribute('data-hermes-send');
+      if (window.hermes && typeof window.hermes.send === 'function') { window.hermes.send(msg); }
+    });
+  });
+</script>
+</body>
+</html>

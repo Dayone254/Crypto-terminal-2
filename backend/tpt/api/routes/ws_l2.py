@@ -20,10 +20,15 @@ async def l2_orderbook_stream(websocket: WebSocket, product_id: str):
     """
     await websocket.accept()
     if not settings.enable_live_ws:
-        # Live streaming is opt-in (ENABLE_LIVE_WS). Close immediately so a
-        # blocked WS network path can't become a per-client retry storm.
-        await websocket.send_json({"error": "live_ws_disabled"})
-        await websocket.close(code=1011)
+        # Live streaming is opt-in (ENABLE_LIVE_WS). Signal it explicitly and
+        # close, so a blocked WS network path can't become a per-client retry
+        # storm. Clients must NOT interpret this frame as order-book data.
+        await websocket.send_json({
+            "type": "ws_disabled",
+            "error": "live_ws_disabled",
+            "message": "Live streaming is disabled (ENABLE_LIVE_WS=false).",
+        })
+        await websocket.close(code=1000)
         return
 
     logger.info(f"Client connected to L2 stream for {product_id}")

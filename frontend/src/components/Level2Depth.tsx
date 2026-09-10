@@ -16,14 +16,43 @@ interface L2Data {
     };
 }
 
+type ConnectionState = "CONNECTING" | "CONNECTED" | "DISCONNECTED" | "UNAVAILABLE";
+
+/**
+ * True only for a well-formed order-book frame.
+ *
+ * The socket also carries a `ws_disabled` notice when live streaming is turned
+ * off server-side. Treating that frame as a book is what produced
+ * "Cannot read properties of undefined (reading 'slice')".
+ */
+function isL2Payload(data: unknown): data is L2Data {
+    if (!data || typeof data !== "object") return false;
+    const d = data as Partial<L2Data>;
+    if (!Array.isArray(d.bids) || !Array.isArray(d.asks)) return false;
+    const m = d.metrics;
+    return (
+        !!m &&
+        typeof m.imbalance_ratio === "number" &&
+        Array.isArray(m.buy_walls) &&
+        Array.isArray(m.sell_walls)
+    );
+}
+
+function isDisabledFrame(data: unknown): boolean {
+    if (!data || typeof data !== "object") return false;
+    const d = data as { type?: string; error?: string };
+    return d.type === "ws_disabled" || d.error === "live_ws_disabled";
+}
+
 export function Level2Depth({ symbol }: { symbol: string }) {
     const [l2Data, setL2Data] = useState<L2Data | null>(null);
-    const [connectionStatus, setConnectionStatus] = useState<"CONNECTING" | "CONNECTED" | "DISCONNECTED">("CONNECTING");
+    const [connectionStatus, setConnectionStatus] = useState<ConnectionState>("CONNECTING");
 
     useEffect(() => {
         let ws: WebSocket;
         let reconnectTimeout: NodeJS.Timeout;
         let disposed = false;
+        let disabled = false;
 
         const connect = () => {
             setConnectionStatus("CONNECTING");
@@ -39,12 +68,34 @@ export function Level2Depth({ symbol }: { symbol: string }) {
 
             ws.onmessage = (event) => {
                 if (disposed) return;
-                const data = JSON.parse(event.data);
-                setL2Data(data);
+
+                let data: unknown;
+                try {
+                    data = JSON.parse(event.data);
+                } catch {
+                    return; // ignore non-JSON frames
+                }
+
+                // Server told us live streaming is off — stop reconnecting and
+                // never feed this frame to the renderer.
+                if (isDisabledFrame(data)) {
+                    disabled = true;
+                    setL2Data(null);
+                    setConnectionStatus("UNAVAILABLE");
+                    return;
+                }
+
+                if (isL2Payload(data)) {
+                    setL2Data(data);
+                }
             };
 
             ws.onclose = () => {
                 if (disposed) return;
+                if (disabled) {
+                    setConnectionStatus("UNAVAILABLE");
+                    return; // closed on purpose — do not reconnect
+                }
                 setConnectionStatus("DISCONNECTED");
                 reconnectTimeout = setTimeout(connect, 3000);
             };
@@ -61,8 +112,6 @@ export function Level2Depth({ symbol }: { symbol: string }) {
             disposed = true;
             clearTimeout(reconnectTimeout);
             if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
-                // Prevent strict mode "closed before established" console spam 
-                // by optionally silencing it or just keeping it clean.
                 ws.close();
             }
         };
@@ -76,7 +125,7 @@ export function Level2Depth({ symbol }: { symbol: string }) {
 
         return (
             <div
-                key={price}
+                key={`${type}-${price}`}
                 style={{
                     display: "flex",
                     justifyContent: "space-between",
@@ -109,17 +158,45 @@ export function Level2Depth({ symbol }: { symbol: string }) {
         );
     };
 
-    if (!l2Data) {
-        return (
-            <div style={{ background: "#0B0F19", border: "none", borderRadius: 0, padding: "1.5rem", textAlign: "center", color: "var(--text-dim)", fontSize: "0.75rem" }}>
-                Connecting to L2 Liquidity Engine...
-            </div>
-        );
+    const placeholder = (text: string, hint?: string) => (
+        <div
+            style={{
+                background: "#0B0F19",
+                border: "none",
+                borderRadius: 0,
+                padding: "1.5rem",
+                textAlign: "center",
+                color: "var(--text-dim)",
+                fontSize: "0.72rem",
+                lineHeight: 1.5,
+            }}
+        >
+            {text}
+            {hint && (
+                <div className="mono" style={{ marginTop: "0.35rem", fontSize: "0.62rem", color: "var(--text-dim)" }}>
+                    {hint}
+                </div>
+            )}
+        </div>
+    );
+
+    if (connectionStatus === "UNAVAILABLE") {
+        return placeholder("Live order book unavailable.", "Enable ENABLE_LIVE_WS on the backend to stream depth.");
     }
 
-    const maxAskVol = Math.max(...l2Data.asks.slice(0, 10).map((a) => a[2]), 1000);
-    const maxBidVol = Math.max(...l2Data.bids.slice(0, 10).map((b) => b[2]), 1000);
-    const ratio = l2Data.metrics.imbalance_ratio;
+    if (!isL2Payload(l2Data)) {
+        return placeholder("Connecting to L2 Liquidity Engine...");
+    }
+
+    // Defensive locals: nothing below can throw on a partial payload.
+    const bids = l2Data.bids;
+    const asks = l2Data.asks;
+    const buyWalls = l2Data.metrics.buy_walls ?? [];
+    const sellWalls = l2Data.metrics.sell_walls ?? [];
+    const ratio = typeof l2Data.metrics.imbalance_ratio === "number" ? l2Data.metrics.imbalance_ratio : 0.5;
+
+    const maxAskVol = Math.max(...asks.slice(0, 10).map((a) => a[2]), 1000);
+    const maxBidVol = Math.max(...bids.slice(0, 10).map((b) => b[2]), 1000);
 
     return (
         <div style={{ background: "#0B0F19", border: "none", borderRadius: 0, padding: "1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -149,15 +226,15 @@ export function Level2Depth({ symbol }: { symbol: string }) {
             </div>
 
             {/* Walls Detection Feed */}
-            {l2Data.metrics.buy_walls.length > 0 || l2Data.metrics.sell_walls.length > 0 ? (
+            {sellWalls.length > 0 || buyWalls.length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-                    {l2Data.metrics.sell_walls.slice(0, 2).map((w, i) => (
+                    {sellWalls.slice(0, 2).map((w, i) => (
                         <div key={`sw-${i}`} style={{ background: "rgba(244, 63, 94, 0.1)", border: "none", padding: "0.3rem 0.5rem", borderRadius: 0, display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.65rem", fontWeight: 800, color: "#F43F5E" }}>
                             <ArrowDownAZ size={12} />
                             WALL: ${Math.round(w.vol_usd).toLocaleString()} @ {w.price < 1 ? w.price.toFixed(5) : w.price.toFixed(2)}
                         </div>
                     ))}
-                    {l2Data.metrics.buy_walls.slice(0, 2).map((w, i) => (
+                    {buyWalls.slice(0, 2).map((w, i) => (
                         <div key={`bw-${i}`} style={{ background: "rgba(16, 185, 129, 0.1)", border: "none", padding: "0.3rem 0.5rem", borderRadius: 0, display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.65rem", fontWeight: 800, color: "#10B981" }}>
                             <ArrowUpZA size={12} />
                             WALL: ${Math.round(w.vol_usd).toLocaleString()} @ {w.price < 1 ? w.price.toFixed(5) : w.price.toFixed(2)}
@@ -174,7 +251,7 @@ export function Level2Depth({ symbol }: { symbol: string }) {
                         <span>BID</span>
                         <span>$ VOL</span>
                     </div>
-                    {l2Data.bids.slice(0, 10).map((b) => renderLevel(b[0], b[2], "BID", maxBidVol))}
+                    {bids.slice(0, 10).map((b) => renderLevel(b[0], b[2], "BID", maxBidVol))}
                 </div>
 
                 {/* Asks */}
@@ -183,7 +260,7 @@ export function Level2Depth({ symbol }: { symbol: string }) {
                         <span>ASK</span>
                         <span>$ VOL</span>
                     </div>
-                    {l2Data.asks.slice(0, 10).map((a) => renderLevel(a[0], a[2], "ASK", maxAskVol))}
+                    {asks.slice(0, 10).map((a) => renderLevel(a[0], a[2], "ASK", maxAskVol))}
                 </div>
             </div>
 
