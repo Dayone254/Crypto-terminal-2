@@ -154,7 +154,7 @@ class TestMultiTimeframeOutputs:
         raw_stats = {"open": "100.0", "high": "110.0", "low": "95.0", "last": "105.0", "volume": "5000"}
         raw_ticker = {"price": "105.0"}
         feats = compute_features(raw_stats, raw_ticker)
-        for key in ["rsi_15m", "rsi_4h", "macd_1h", "macd_signal_1h", "bb_width_1h", "bb_pct_b_1h", "atr_1h", "volume_ratio_1h", "ema_trend_4h"]:
+        for key in ["rsi_15m", "rsi_6h", "macd_1h", "macd_signal_1h", "bb_width_1h", "bb_pct_b_1h", "atr_1h", "volume_ratio_1h", "ema_trend_6h"]:
             assert key in feats
             assert feats[key] is None
 

@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import select
 
 from tpt.adapters.coinbase import CoinbaseAdapter
+from tpt.config.settings import settings
 from tpt.config.strategy import load_strategy
 from tpt.db.connection import AsyncSessionLocal, init_db
 from tpt.db.models import Feature, Ladder, ScanRun, Score, Snapshot, Symbol, new_uuid, utcnow_iso
@@ -102,11 +103,41 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
         logger.info("Inserted %d new backtest signal(s).", inserted)
 
 
+_scan_lock = asyncio.Lock()
+
+
+def is_scan_running() -> bool:
+    """True while a scan holds the scan lock."""
+    return _scan_lock.locked()
+
+
 async def run_scan(
     trigger: str = "ON_DEMAND",
     adapter: CoinbaseAdapter | None = None,
 ) -> ScanRunResult:
-    """Execute a full market scan run."""
+    """Run a market scan, refusing to overlap with a scan already in flight.
+
+    Two concurrent scans double upstream API load and contend for SQLite's single
+    write lock (the scheduled loop and a manual trigger could otherwise collide),
+    so a second trigger is skipped rather than stacked.
+    """
+    if _scan_lock.locked():
+        logger.warning("A scan is already in progress; skipping %s trigger.", trigger)
+        return ScanRunResult(
+            scan_run_id="",
+            trigger=trigger,
+            status="SKIPPED",
+            error_message="A scan is already in progress.",
+        )
+    async with _scan_lock:
+        return await _execute_scan(trigger=trigger, adapter=adapter)
+
+
+async def _execute_scan(
+    trigger: str = "ON_DEMAND",
+    adapter: CoinbaseAdapter | None = None,
+) -> ScanRunResult:
+    """Execute a full market scan run. Callers must hold `_scan_lock`."""
     start_time = time.monotonic()
     await init_db()
 
@@ -144,9 +175,10 @@ async def run_scan(
 
         product_ids = [p["id"] for p in products]
 
-        # Lock the WS background buffer onto the active watchlist universe
-        if watchlist_set:
-            asyncio.create_task(ws_memory.subscribe(list(watchlist_set)))
+        # NOTE: live WebSocket buffers are (re)balanced at the END of the scan,
+        # once the candidate ranking is known — see the bounded subscription
+        # block below. Subscribing per-symbol inside the loop exhausted the
+        # event loop's file descriptors.
 
         # 2. Phase 1: Fetch 24h stats for active products
         async def fetch_stats(pid: str) -> tuple[str, dict[str, Any] | None]:
@@ -179,8 +211,6 @@ async def run_scan(
         min_vol = cfg.labeling.min_quote_volume
         candle_candidates: set[str] = {"BTC-USD"}
 
-        await ws_memory.sync_active_universe(product_ids)
-
         for pid in product_ids:
             if pid in stale_symbols:
                 continue
@@ -206,33 +236,37 @@ async def run_scan(
 
         # 4. Phase 2: multi-timeframe candles for candidates
         async def fetch_candles(pid: str) -> tuple[str, Any, Any, Any, Any]:
-            try:
-                c1h, c1d, c15m, c4h = await asyncio.gather(
-                    adapter.get_candles(pid, granularity=3600, limit=300),
-                    adapter.get_candles(pid, granularity=86400, limit=30),
-                    adapter.get_candles_15m(pid, limit=50),
-                    adapter.get_candles_4h(pid, limit=60),
-                    return_exceptions=False,
-                )
-                return pid, c1h, c1d, c15m, c4h
-            except Exception:
-                return pid, None, None, None, None
+            # return_exceptions=True: a failure in ONE timeframe (e.g. an
+            # unsupported granularity) must not discard the other three. With
+            # return_exceptions=False a single failing request nullified the
+            # entire candle pipeline for the symbol.
+            results = await asyncio.gather(
+                adapter.get_candles(pid, granularity=3600, limit=300),
+                adapter.get_candles(pid, granularity=86400, limit=30),
+                adapter.get_candles_15m(pid, limit=50),
+                adapter.get_candles_6h(pid, limit=60),
+                return_exceptions=True,
+            )
+            cleaned: list[Any] = [
+                None if isinstance(r, BaseException) else r for r in results
+            ]
+            return (pid, cleaned[0], cleaned[1], cleaned[2], cleaned[3])
 
         phase2_results = await asyncio.gather(*[fetch_candles(pid) for pid in candle_candidates])
         candles_1h_map: dict[str, list[list[Any]]] = {}
         candles_1d_map: dict[str, list[list[Any]]] = {}
         candles_15m_map: dict[str, list[list[Any]]] = {}
-        candles_4h_map: dict[str, list[list[Any]]] = {}
+        candles_6h_map: dict[str, list[list[Any]]] = {}
 
-        for pid, c1h, c1d, c15m, c4h in phase2_results:
+        for pid, c1h, c1d, c15m, c6h in phase2_results:
             if c1h is not None:
                 candles_1h_map[pid] = c1h
             if c1d is not None:
                 candles_1d_map[pid] = c1d
             if c15m is not None:
                 candles_15m_map[pid] = c15m
-            if c4h is not None:
-                candles_4h_map[pid] = c4h
+            if c6h is not None:
+                candles_6h_map[pid] = c6h
 
         # 5. Phase 3: features, scoring, labeling, laddering
         candidates_out: list[dict[str, Any]] = []
@@ -251,7 +285,7 @@ async def run_scan(
                     raw_candles_1d=candles_1d_map.get("BTC-USD"),
                     btc_day_change_pct=None,
                     raw_candles_15m=candles_15m_map.get("BTC-USD"),
-                    raw_candles_4h=candles_4h_map.get("BTC-USD"),
+                    raw_candles_6h=candles_6h_map.get("BTC-USD"),
                 )
                 current_regime = detect_regime(btc_feats)
             except Exception as exc:
@@ -299,7 +333,7 @@ async def run_scan(
                     c1h = candles_1h_map.get(pid)
                     c1d = candles_1d_map.get(pid)
                     c15m = candles_15m_map.get(pid)
-                    c4h = candles_4h_map.get(pid)
+                    c6h = candles_6h_map.get(pid)
                     pinned = (pid in watchlist_set)
 
                     feats = compute_features(
@@ -309,7 +343,7 @@ async def run_scan(
                         raw_candles_1d=c1d,
                         btc_day_change_pct=btc_day_change,
                         raw_candles_15m=c15m,
-                        raw_candles_4h=c4h,
+                        raw_candles_6h=c6h,
                     )
                     feats["product_id"] = pid
 
@@ -333,8 +367,6 @@ async def run_scan(
 
                     # --- L2 validation (WS cache first, REST fallback) ---
                     if comp_score >= 50.0 or pinned:
-                        if pid not in ws_memory._active_symbols:
-                            asyncio.create_task(ws_memory.subscribe([pid]))
                         try:
                             l2 = ws_memory.get_l2(pid)
                             if not l2 or not l2.get("bids"):
@@ -566,6 +598,24 @@ async def run_scan(
                 await send_setup_alert(**alert)
             except Exception as exc:
                 logger.warning("Telegram alert failed for %s: %s", alert["symbol"], exc)
+
+        # --- Live L2 buffer management (bounded, prioritised) ---
+        # Pinned symbols first, then the highest-scoring candidates, hard-capped:
+        # three sockets per symbol otherwise exhausts the event loop.
+        if settings.enable_live_ws:
+            try:
+                ranked = sorted(candidates_out, key=lambda c: c["composite_score"], reverse=True)
+                desired = list(dict.fromkeys(
+                    [*sorted(watchlist_set), *(c["product_id"] for c in ranked)]
+                ))[: settings.max_ws_subscriptions]
+
+                await ws_memory.sync_active_universe(desired)
+                await ws_memory.subscribe(desired)
+                logger.info("Live L2 buffer tracking %d symbol(s).", len(desired))
+            except Exception as exc:
+                logger.warning("Live L2 buffer management failed: %s", exc)
+        else:
+            logger.info("Live L2 buffer disabled; scanner uses REST order-book snapshots.")
 
         if own_adapter:
             await adapter.close()

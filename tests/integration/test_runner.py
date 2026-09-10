@@ -62,6 +62,21 @@ async def test_run_scan_mocked(mock_adapter: CoinbaseAdapter) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_scans_are_refused(mock_adapter: CoinbaseAdapter) -> None:
+    """A second scan must not stack on top of one already in flight.
+
+    The scheduled loop and a manual trigger used to run concurrently, doubling
+    API load and colliding on SQLite's single write lock.
+    """
+    from tpt.scanner import runner
+
+    async with runner._scan_lock:
+        result = await runner.run_scan(trigger="ON_DEMAND", adapter=mock_adapter)
+    assert result.status == "SKIPPED"
+    assert "already in progress" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
 async def test_run_scan_persists_results(mock_adapter: CoinbaseAdapter) -> None:
     """Regression: the scan session used to never commit, so every feature /
     score / snapshot was rolled back and the dashboard stayed empty."""

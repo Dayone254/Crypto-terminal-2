@@ -10,6 +10,10 @@ logger = logging.getLogger(__name__)
 
 BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
 
+# Give up after this many consecutive connection failures rather than retrying
+# forever (a blocked WS path would otherwise storm handshakes indefinitely).
+MAX_CONSECUTIVE_WS_FAILURES = 5
+
 def format_binance_symbol(product_id: str) -> str:
     """Converts Coinbase product_id (BTC-USD) to Binance symbol (btcusdt)."""
     # Simply replace -USD with USDT and make lowercase
@@ -56,7 +60,20 @@ async def stream_binance_l2(product_id: str) -> AsyncGenerator[dict[str, Any], N
             logger.error(f"Binance WS connection error: {e}")
             
         reconnect_attempts += 1
+        if reconnect_attempts > MAX_CONSECUTIVE_WS_FAILURES:
+            logger.error(
+                "Binance WS for %s giving up after %d consecutive failures",
+                product_id,
+                reconnect_attempts - 1,
+            )
+            return
         sleep_time = min(2 ** reconnect_attempts, 30)
-        logger.info(f"Reconnecting to Binance WS in {sleep_time} seconds...")
+        logger.warning(
+            "Reconnecting Binance WS for %s in %ds (attempt %d/%d)",
+            product_id,
+            sleep_time,
+            reconnect_attempts,
+            MAX_CONSECUTIVE_WS_FAILURES,
+        )
         await asyncio.sleep(sleep_time)
 

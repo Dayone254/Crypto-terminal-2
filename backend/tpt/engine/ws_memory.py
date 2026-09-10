@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Any
 
+from tpt.config.settings import settings
 from tpt.engine.l2_multiplexer import stream_multiplexed_l2
 from tpt.engine.ws_candle import stream_ticker
 
@@ -48,22 +49,52 @@ class BackgroundMemoryStore:
         except Exception as e:
             logger.error(f"Ticker Buffer Error for {product_id}: {e}")
 
-    async def subscribe(self, product_ids: list[str]):
-        """Expand subscriptions dynamically."""
+    async def subscribe(self, product_ids: list[str], max_symbols: int | None = None):
+        """Expand subscriptions dynamically, up to a hard cap.
+
+        Each symbol costs three sockets: Binance L2, Coinbase L2 and a ticker
+        stream. Subscribing to every scored symbol (100+) exhausted the event
+        loop's file descriptors — `ValueError: too many file descriptors in
+        select()` — which killed the whole server mid-scan. The set is therefore
+        capped (see settings.max_ws_subscriptions).
+        """
+        cap = max_symbols if max_symbols is not None else settings.max_ws_subscriptions
+        capped = False
+
+        if not settings.enable_live_ws:
+            logger.info(
+                "Live WS disabled (ENABLE_LIVE_WS=false); using REST L2 snapshots for %d symbol(s).",
+                len(product_ids),
+            )
+            return
+
         for pid in product_ids:
-            if pid not in self._active_symbols:
-                self._active_symbols.add(pid)
-                self.l2_books[pid] = {"bids": [], "asks": []}
-                self.tickers[pid] = {}
-                
-                # Start consuming loops
-                t_l2 = asyncio.create_task(self._consume_l2(pid))
-                t_tick = asyncio.create_task(self._consume_ticker(pid))
-                self._tasks[pid] = (t_l2, t_tick)
-                
-                # Sleep briefly to avoid connection burst rate-limits
-                await asyncio.sleep(0.1)
-                
+            if pid in self._active_symbols:
+                continue
+            if len(self._active_symbols) >= cap:
+                capped = True
+                continue
+
+            self._active_symbols.add(pid)
+            self.l2_books[pid] = {"bids": [], "asks": []}
+            self.tickers[pid] = {}
+
+            # Start consuming loops
+            t_l2 = asyncio.create_task(self._consume_l2(pid))
+            t_tick = asyncio.create_task(self._consume_ticker(pid))
+            self._tasks[pid] = (t_l2, t_tick)
+
+            # Sleep briefly to avoid connection burst rate-limits
+            await asyncio.sleep(0.1)
+
+        if capped:
+            logger.warning(
+                "WS subscription cap (%d symbols) reached; %d requested symbol(s) skipped. "
+                "Raise MAX_WS_SUBSCRIPTIONS to hold more live buffers.",
+                cap,
+                len(product_ids) - len(self._active_symbols),
+            )
+
         # Start options daemon lazily if not running
         if self._options_task is None:
             self._options_task = asyncio.create_task(self._sync_options_flow())

@@ -21,14 +21,14 @@ def detect_regime(btc_features: FeatureDict) -> Regime:
     Returns:
         The detected Regime classification.
     """
-    rsi_4h = btc_features.get("rsi_4h")
-    ema_trend = btc_features.get("ema_trend_4h")
+    rsi_6h = btc_features.get("rsi_6h")
+    ema_trend = btc_features.get("ema_trend_6h")
     bb_width = btc_features.get("bb_width_1h")
     day_change = btc_features.get("day_change_pct") or 0.0
 
     # Fallbacks if multi-timeframe data is missing
-    if rsi_4h is None:
-        rsi_4h = 50.0
+    if rsi_6h is None:
+        rsi_6h = 50.0
     if ema_trend is None:
         ema_trend = (day_change > 0)
     if bb_width is None:
@@ -46,17 +46,17 @@ def detect_regime(btc_features: FeatureDict) -> Regime:
         return "VOLATILE"
 
     # 2. Ranging / Compression States
-    # (Bollinger Bands tightly compressed or 4H RSI dead flat)
-    if bb_width < 0.015 or (45.0 <= rsi_4h <= 55.0 and abs(day_change) < 1.0):
+    # (Bollinger Bands tightly compressed or 6h RSI dead flat)
+    if bb_width < 0.015 or (45.0 <= rsi_6h <= 55.0 and abs(day_change) < 1.0):
         return "RANGING"
 
     # 3. Trending States
-    # Up: Above 4h EMA(50), 4h RSI > 50, and generally positive day change
-    if ema_trend and rsi_4h > 50.0 and day_change > -1.0:
+    # Up: Above 6h EMA(50), 6h RSI > 50, and generally positive day change
+    if ema_trend and rsi_6h > 50.0 and day_change > -1.0:
         return "TRENDING_UP"
         
-    # Down: Below 4h EMA(50), 4h RSI < 50, and generally negative day change
-    if not ema_trend and rsi_4h < 50.0 and day_change < 1.0:
+    # Down: Below 6h EMA(50), 6h RSI < 50, and generally negative day change
+    if not ema_trend and rsi_6h < 50.0 and day_change < 1.0:
         return "TRENDING_DOWN"
 
     # 4. Default Fallback

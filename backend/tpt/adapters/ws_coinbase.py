@@ -10,6 +10,10 @@ logger = logging.getLogger(__name__)
 
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
 
+# Give up after this many consecutive connection failures rather than retrying
+# forever (a blocked WS path would otherwise storm handshakes indefinitely).
+MAX_CONSECUTIVE_WS_FAILURES = 5
+
 async def stream_coinbase_l2(product_id: str) -> AsyncGenerator[dict[str, Any], None]:
     """
     Connects to Coinbase ws-feed level2 stream.
@@ -95,7 +99,20 @@ async def stream_coinbase_l2(product_id: str) -> AsyncGenerator[dict[str, Any], 
             logger.error(f"Coinbase WS connection error: {e}")
 
         reconnect_attempts += 1
+        if reconnect_attempts > MAX_CONSECUTIVE_WS_FAILURES:
+            logger.error(
+                "Coinbase WS for %s giving up after %d consecutive failures",
+                product_id,
+                reconnect_attempts - 1,
+            )
+            return
         sleep_time = min(2 ** reconnect_attempts, 30)
-        logger.info(f"Reconnecting to Coinbase WS in {sleep_time} seconds...")
+        logger.warning(
+            "Reconnecting Coinbase WS for %s in %ds (attempt %d/%d)",
+            product_id,
+            sleep_time,
+            reconnect_attempts,
+            MAX_CONSECUTIVE_WS_FAILURES,
+        )
         await asyncio.sleep(sleep_time)
 

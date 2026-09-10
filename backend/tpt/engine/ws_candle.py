@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"
 
+# Give up after this many consecutive connection failures instead of retrying
+# forever. A blocked WebSocket path otherwise turns into a permanent handshake
+# storm that saturates the event loop.
+MAX_CONSECUTIVE_WS_FAILURES = 5
+
 
 async def stream_ticker(product_id: str) -> AsyncGenerator[dict[str, Any], None]:
     """Stream real-time ticker ticks for `product_id`.
@@ -31,10 +36,12 @@ async def stream_ticker(product_id: str) -> AsyncGenerator[dict[str, Any], None]
         "channel": "ticker",
     })
 
+    attempts = 0
     while True:
         try:
             async with websockets.connect(COINBASE_WS_URL, ping_interval=20) as ws:
                 await ws.send(subscribe_msg)
+                attempts = 0
                 logger.info("Ticker WebSocket subscribed for %s", product_id)
 
                 async for raw in ws:
@@ -58,5 +65,22 @@ async def stream_ticker(product_id: str) -> AsyncGenerator[dict[str, Any], None]
             logger.info("Ticker stream cancelled for %s", product_id)
             return
         except Exception as e:
-            logger.warning("Ticker stream error for %s: %s — reconnecting in 3s", product_id, e)
-            await asyncio.sleep(3)
+            attempts += 1
+            if attempts > MAX_CONSECUTIVE_WS_FAILURES:
+                logger.error(
+                    "Ticker stream for %s giving up after %d consecutive failures: %s",
+                    product_id,
+                    attempts - 1,
+                    e,
+                )
+                return
+            backoff = min(2 ** attempts, 30)
+            logger.warning(
+                "Ticker stream error for %s: %s — reconnecting in %ds (attempt %d/%d)",
+                product_id,
+                e,
+                backoff,
+                attempts,
+                MAX_CONSECUTIVE_WS_FAILURES,
+            )
+            await asyncio.sleep(backoff)

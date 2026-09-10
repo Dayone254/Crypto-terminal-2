@@ -251,7 +251,7 @@ def compute_features(
     btc_day_change_pct: float | None = None,
     l2_snapshot: dict[str, Any] | None = None,
     raw_candles_15m: list[list[Any]] | None = None,
-    raw_candles_4h: list[list[Any]] | None = None,
+    raw_candles_6h: list[list[Any]] | None = None,
 ) -> FeatureDict:
     """Compute all features for a single symbol from raw API data."""
     # Prices
@@ -359,12 +359,12 @@ def compute_features(
         closes_15m = [float(c[4]) for c in sorted_15m if len(c) >= 5]
         rsi_15m = _compute_rsi(closes_15m, period=14)
 
-    # 4h RSI
-    rsi_4h: float | None = None
-    if raw_candles_4h:
-        sorted_4h = sorted(raw_candles_4h, key=lambda c: float(c[0]))
-        closes_4h = [float(c[4]) for c in sorted_4h if len(c) >= 5]
-        rsi_4h = _compute_rsi(closes_4h, period=14)
+    # 6h RSI
+    rsi_6h: float | None = None
+    if raw_candles_6h:
+        sorted_6h = sorted(raw_candles_6h, key=lambda c: float(c[0]))
+        closes_6h = [float(c[4]) for c in sorted_6h if len(c) >= 5]
+        rsi_6h = _compute_rsi(closes_6h, period=14)
 
     # 1h MACD (12, 26, 9)
     macd_1h: float | None = None
@@ -396,14 +396,14 @@ def compute_features(
         sorted_1h_vol = sorted(raw_candles_1h, key=lambda c: float(c[0]))
         volume_ratio_1h = _compute_volume_ratio(sorted_1h_vol, lookback=20)
 
-    # 4h EMA(50) Trend Direction
-    ema_trend_4h: bool | None = None
-    if raw_candles_4h and len(raw_candles_4h) >= 50:
-        sorted_4h_ema = sorted(raw_candles_4h, key=lambda c: float(c[0]))
-        closes_4h_ema = [float(c[4]) for c in sorted_4h_ema if len(c) >= 5]
-        if len(closes_4h_ema) >= 50:
-            ema_50 = _compute_ema(closes_4h_ema, 50)
-            ema_trend_4h = closes_4h_ema[-1] > ema_50[-1]
+    # 6h EMA(50) Trend Direction
+    ema_trend_6h: bool | None = None
+    if raw_candles_6h and len(raw_candles_6h) >= 50:
+        sorted_6h_ema = sorted(raw_candles_6h, key=lambda c: float(c[0]))
+        closes_6h_ema = [float(c[4]) for c in sorted_6h_ema if len(c) >= 5]
+        if len(closes_6h_ema) >= 50:
+            ema_50 = _compute_ema(closes_6h_ema, 50)
+            ema_trend_6h = closes_6h_ema[-1] > ema_50[-1]
 
     return {
         "last_price": last_price,
@@ -421,14 +421,14 @@ def compute_features(
         "fib_786": round(fibs["fib_786"], 6),
         "rsi_1h": rsi_1h,
         "rsi_15m": rsi_15m,
-        "rsi_4h": rsi_4h,
+        "rsi_6h": rsi_6h,
         "macd_1h": macd_1h,
         "macd_signal_1h": macd_signal_1h,
         "bb_width_1h": bb_width_1h,
         "bb_pct_b_1h": bb_pct_b_1h,
         "atr_1h": atr_1h,
         "volume_ratio_1h": volume_ratio_1h,
-        "ema_trend_4h": ema_trend_4h,
+        "ema_trend_6h": ema_trend_6h,
         "rs_vs_btc": round(rs_vs_btc, 4),
         "swing_shelf_7d": round(swing_shelf_7d, 6) if swing_shelf_7d is not None else None,
         "swing_high_7d": round(swing_high_7d, 6) if swing_high_7d is not None else None,

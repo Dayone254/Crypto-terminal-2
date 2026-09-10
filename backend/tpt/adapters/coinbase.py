@@ -47,6 +47,9 @@ class CoinbaseAdapter(ExchangeAdapter):
 
     BASE_URL = "https://api.exchange.coinbase.com"
 
+    # HTTP client errors that cannot succeed on retry.
+    NON_RETRYABLE_STATUS = frozenset({400, 401, 403, 404, 405, 409, 422})
+
     def __init__(
         self,
         base_url: str = BASE_URL,
@@ -76,28 +79,45 @@ class CoinbaseAdapter(ExchangeAdapter):
             await self._client.aclose()
 
     async def _request(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
-        """Execute rate-limited request with retry and exponential backoff."""
+        """Execute a rate-limited request, retrying only *transient* failures.
+
+        Retries connection errors, HTTP 429 and 5xx. A 4xx (for example an
+        unsupported candle granularity) is surfaced immediately: retrying a
+        permanent error only multiplies load and stalls the scan.
+        """
         client = await self._get_client()
         url = f"{self.base_url}{endpoint}"
         max_retries = 3
 
         for attempt in range(max_retries + 1):
+            is_last = attempt >= max_retries
             await self.rate_limiter.acquire()
             async with self.semaphore:
                 try:
                     response = await client.get(url, params=params)
-                    if response.status_code == 429 and attempt < max_retries:
-                        backoff = min(60.0, (2.0 ** attempt) * 2.0)
-                        await asyncio.sleep(backoff)
-                        continue
+                except httpx.RequestError:
+                    if is_last:
+                        raise
+                    await asyncio.sleep(self._backoff(attempt))
+                    continue
+
+                status = response.status_code
+
+                if status in self.NON_RETRYABLE_STATUS:
                     response.raise_for_status()
-                    return response.json()
-                except (httpx.HTTPStatusError, httpx.RequestError) as exc:
-                    if attempt < max_retries:
-                        backoff = min(60.0, (2.0 ** attempt) * 2.0)
-                        await asyncio.sleep(backoff)
-                    else:
-                        raise exc
+
+                if (status == 429 or status >= 500) and not is_last:
+                    await asyncio.sleep(self._backoff(attempt))
+                    continue
+
+                response.raise_for_status()
+                return response.json()
+
+        raise RuntimeError(f"Request retries exhausted for {url}")
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        return min(60.0, (2.0 ** attempt) * 2.0)
 
     async def get_products(self) -> list[dict[str, Any]]:
         """Return active USD spot products."""
@@ -168,8 +188,12 @@ class CoinbaseAdapter(ExchangeAdapter):
         """Return 15-minute OHLCV candles (newest first)."""
         return await self.get_candles(product_id, granularity=900, limit=limit)
 
-    async def get_candles_4h(
+    async def get_candles_6h(
         self, product_id: str, limit: int = 60
     ) -> list[list[Any]]:
-        """Return 4-hour OHLCV candles (newest first). Default 60 = 10 days."""
-        return await self.get_candles(product_id, granularity=14400, limit=limit)
+        """Return 6-hour OHLCV candles (newest first). Default 60 = 15 days.
+
+        Coinbase supports granularities 60/300/900/3600/21600/86400 — there is no
+        4-hour option, so 6h is the nearest higher timeframe.
+        """
+        return await self.get_candles(product_id, granularity=21600, limit=limit)

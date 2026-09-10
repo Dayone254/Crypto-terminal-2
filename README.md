@@ -129,6 +129,16 @@ make typecheck
   `FRONTEND_URL`. There is **no authentication** unless you set `API_TOKEN`
   (the UI reads `NEXT_PUBLIC_API_TOKEN`). Do not bind to `0.0.0.0` without it.
 
+**Live streaming (opt-in)**
+- Live WebSocket L2/ticker streaming is **off by default** (`ENABLE_LIVE_WS=true`
+  to enable). It requires an outbound path that permits WSS upgrades; when the
+  handshake is blocked the streams reconnect-storm and can exhaust the event
+  loop's file descriptors. With it disabled the scanner uses REST order-book
+  snapshots and `/ws/*` closes immediately.
+- When enabled, the subscription set is hard-capped (`MAX_WS_SUBSCRIPTIONS`,
+  default 20 — three sockets per symbol) and streams give up after 5 consecutive
+  failures instead of retrying forever.
+
 **Not built / not covered**
 - No frontend test suite (type-check + production build only).
 - `tpt/engine/feedback.py` (component hit-rate feedback) is not wired into the

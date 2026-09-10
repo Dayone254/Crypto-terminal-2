@@ -3,6 +3,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from tpt.config.settings import settings
 from tpt.engine.l2_multiplexer import stream_multiplexed_l2
 from tpt.engine.l2_processor import process_l2_book
 
@@ -18,6 +19,13 @@ async def l2_orderbook_stream(websocket: WebSocket, product_id: str):
     and relays frames.
     """
     await websocket.accept()
+    if not settings.enable_live_ws:
+        # Live streaming is opt-in (ENABLE_LIVE_WS). Close immediately so a
+        # blocked WS network path can't become a per-client retry storm.
+        await websocket.send_json({"error": "live_ws_disabled"})
+        await websocket.close(code=1011)
+        return
+
     logger.info(f"Client connected to L2 stream for {product_id}")
     
     # We create a task to consume from multiplexer
