@@ -95,9 +95,15 @@ class BackgroundMemoryStore:
                 len(product_ids) - len(self._active_symbols),
             )
 
-        # Start options daemon lazily if not running
-        if self._options_task is None:
+    def start_options_daemon(self) -> asyncio.Task:
+        """Start the macro options-flow refresh loop.
+
+        Deliberately independent of L2 subscriptions: options gamma/IV-skew for
+        BTC/ETH must keep working even when live WebSocket streaming is disabled.
+        """
+        if self._options_task is None or self._options_task.done():
             self._options_task = asyncio.create_task(self._sync_options_flow())
+        return self._options_task
 
     async def _sync_options_flow(self):
         """Background loop caching Deribit Options Flow precisely every 5 minutes."""

@@ -95,10 +95,16 @@ async def lifespan(app: FastAPI):
         await db.commit()
 
     from tpt.engine.evaluator import evaluator_loop
+    from tpt.engine.ws_memory import ws_memory
+
+    # Options-flow cache (BTC/ETH gamma, IV skew) runs regardless of whether live
+    # WebSocket streaming is enabled.
+    options_task = ws_memory.start_options_daemon()
 
     tasks = [
         asyncio.create_task(evaluator_loop(), name="evaluator"),
         asyncio.create_task(_scan_scheduler_loop(), name="scan-scheduler"),
+        options_task,
     ]
     try:
         yield
