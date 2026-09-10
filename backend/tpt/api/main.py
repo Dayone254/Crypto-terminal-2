@@ -10,7 +10,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from tpt.api.routes import alerts, config, health, markets, scan, watchlist
 from tpt.config.settings import settings
+from tpt.db.connection import init_db
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,18 @@ async def _scan_scheduler_loop() -> None:
         except Exception as exc:
             logger.error("Scheduled scan failed: %s", exc)
 
+        # Delivery runs after each scan: undelivered alerts when outside quiet
+        # hours, plus the morning digest for anything suppressed overnight.
+        try:
+            from tpt.alerting.delivery import deliver_morning_digest, deliver_pending_alerts
+
+            await deliver_pending_alerts()
+            await deliver_morning_digest()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Alert delivery failed: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -94,10 +108,6 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-from tpt.api.routes import alerts, config, health, markets, scan, watchlist
-from tpt.db.connection import init_db
-
-
 def create_app() -> FastAPI:
     application = FastAPI(
         title="Top Picker Terminal API",
@@ -125,9 +135,11 @@ def create_app() -> FastAPI:
     if settings.api_token:
         @application.middleware("http")
         async def enforce_api_token(request: Request, call_next):
-            if request.url.path.startswith("/api/"):
-                if request.headers.get("x-api-token") != settings.api_token:
-                    return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+            if (
+                request.url.path.startswith("/api/")
+                and request.headers.get("x-api-token") != settings.api_token
+            ):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
     # Routers

@@ -1,9 +1,16 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { NativeChart } from "@/components/NativeChart";
+import dynamic from "next/dynamic";
 import { X, LayoutGrid, Search } from "lucide-react";
 import { fetchCandidates, CandidateRow } from "@/lib/api";
+
+// klinecharts touches `window` on import, so it must never be evaluated during
+// server-side prerendering.
+const NativeChart = dynamic(
+    () => import("@/components/NativeChart").then((mod) => mod.NativeChart),
+    { ssr: false }
+);
 
 const DEFAULT_SYMBOLS = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"];
 

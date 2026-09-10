@@ -35,10 +35,7 @@ def compute_greeks(S: float, K: float, T: float, r: float, sigma: float, option_
     d1, d2 = calculate_d1_d2(S, K, T, r, sigma)
     
     # Delta
-    if option_type == "C":
-        delta = norm_cdf(d1)
-    else:
-        delta = norm_cdf(d1) - 1.0
+    delta = norm_cdf(d1) if option_type == "C" else norm_cdf(d1) - 1.0
         
     # Gamma (Same for Call and Put)
     gamma = norm_pdf(d1) / (S * sigma * math.sqrt(T))

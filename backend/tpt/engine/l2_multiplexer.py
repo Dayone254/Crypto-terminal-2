@@ -12,7 +12,7 @@ async def stream_multiplexed_l2(product_id: str) -> AsyncGenerator[dict[str, Any
     """
     Multiplexes Binance and Coinbase L2 streams into a single aggregated feed.
     """
-    queue = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
 
     async def consume_binance():
         try:
@@ -35,7 +35,7 @@ async def stream_multiplexed_l2(product_id: str) -> AsyncGenerator[dict[str, Any
     t1 = asyncio.create_task(consume_binance())
     t2 = asyncio.create_task(consume_coinbase())
 
-    books = {
+    books: dict[str, dict[str, list[Any]]] = {
         "binance": {"bids": [], "asks": []},
         "coinbase": {"bids": [], "asks": []}
     }

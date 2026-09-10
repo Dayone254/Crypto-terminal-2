@@ -261,10 +261,7 @@ def compute_features(
     day_low = float(raw_stats.get("low") or last_price)
 
     # 24h Change %
-    if day_open > 0:
-        day_change_pct = ((last_price - day_open) / day_open) * 100.0
-    else:
-        day_change_pct = 0.0
+    day_change_pct = (last_price - day_open) / day_open * 100.0 if day_open > 0 else 0.0
 
     # Relative Strength against BTC
     rs_vs_btc = day_change_pct - (btc_day_change_pct or 0.0)
@@ -318,10 +315,7 @@ def compute_features(
         rsi_1h = _compute_rsi(closes_1h, period=14)
 
     # RS vs BTC
-    if btc_day_change_pct is not None:
-        rs_vs_btc = day_change_pct - btc_day_change_pct
-    else:
-        rs_vs_btc = 0.0
+    rs_vs_btc = day_change_pct - btc_day_change_pct if btc_day_change_pct is not None else 0.0
 
     # (Swings moved up)
 
@@ -333,8 +327,8 @@ def compute_features(
         for i in range(1, len(sorted_1d)):
             prev_c = float(sorted_1d[i - 1][4])
             h = float(sorted_1d[i][2])
-            l = float(sorted_1d[i][1])
-            tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+            lo = float(sorted_1d[i][1])
+            tr = max(h - lo, abs(h - prev_c), abs(lo - prev_c))
             true_ranges.append(tr)
         if true_ranges:
             atr_14d = sum(true_ranges[-14:]) / len(true_ranges[-14:])

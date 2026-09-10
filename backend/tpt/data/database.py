@@ -3,8 +3,10 @@
 The database path is derived from `settings.database_url` so that the ORM layer
 and this raw layer can never diverge onto different files.
 """
+import contextlib
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 
 import aiosqlite
 
@@ -78,18 +80,14 @@ async def init_db():
         )
         # Migrate existing DBs that lack newer columns.
         for col, definition in _SIGNALS_COLUMNS:
-            try:
+            # Column already exists on an up-to-date database.
+            with contextlib.suppress(Exception):
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col} {definition}")
-            except Exception:
-                pass  # Column already exists
         # Indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_scan_run ON signals(scan_run_id)")
         await db.commit()
-
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager

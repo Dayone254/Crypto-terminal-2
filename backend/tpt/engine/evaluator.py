@@ -134,9 +134,10 @@ async def _resolve_same_candle_collision(
 
 async def process_signals():
     """Evaluate all PENDING signals against real price action."""
-    async with get_connection() as conn:
-        async with conn.execute("SELECT * FROM signals WHERE status='PENDING'") as cur:
-            signals = await cur.fetchall()
+    async with get_connection() as conn, conn.execute(
+        "SELECT * FROM signals WHERE status='PENDING'"
+    ) as cur:
+        signals = await cur.fetchall()
 
     if not signals:
         return
@@ -184,8 +185,8 @@ async def process_signals():
                         for j in range(i-13, i+1):
                             prev_c = float(candles[j-1][4])
                             h = float(candles[j][2])
-                            l = float(candles[j][1])
-                            trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
+                            lo = float(candles[j][1])
+                            trs.append(max(h - lo, abs(h - prev_c), abs(lo - prev_c)))
                         live_atr = sum(trs) / len(trs)
 
                     # ── Phase 1: Wait for entry fill ──────────────────────

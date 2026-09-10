@@ -6,8 +6,15 @@ import {
     Activity, TrendingUp, TrendingDown, Clock, Target, ShieldAlert,
     Crosshair, Zap, Trophy, Filter, RefreshCw, Eye, ExternalLink, X
 } from "lucide-react";
-import { NativeChart } from "@/components/NativeChart";
+import dynamic from "next/dynamic";
 import { API_BASE } from "@/lib/api";
+
+// klinecharts touches `window` on import, so it must never be evaluated during
+// server-side prerendering.
+const NativeChart = dynamic(
+    () => import("@/components/NativeChart").then((mod) => mod.NativeChart),
+    { ssr: false }
+);
 
 const API = `${API_BASE}/api/v1/backtest`;
 

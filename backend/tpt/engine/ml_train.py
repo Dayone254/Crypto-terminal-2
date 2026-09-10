@@ -51,11 +51,16 @@ def synthesize_dataset(samples=10000):
         prob = 0.50
         
         row = df.iloc[i]
-        if row['rs_vs_btc'] > 2.0: prob += 0.20
-        elif row['rs_vs_btc'] < -2.0: prob -= 0.15
-        
-        if row['iv_skew'] > 0.03: prob -= 0.10   # Fear
-        elif row['iv_skew'] < -0.03: prob += 0.15 # Greed
+        if row['rs_vs_btc'] > 2.0:
+            prob += 0.20
+        elif row['rs_vs_btc'] < -2.0:
+            prob -= 0.15
+
+        # Fear (puts bid) is bearish, greed (calls bid) is bullish.
+        if row['iv_skew'] > 0.03:
+            prob -= 0.10
+        elif row['iv_skew'] < -0.03:
+            prob += 0.15
         
         if row['rsi_1h'] < 35 and row['volume_ratio_1h'] > 1.5:
             prob += 0.25 # Coiled spring setup

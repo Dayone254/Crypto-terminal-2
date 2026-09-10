@@ -11,9 +11,10 @@ async def compute_signal_feedback(min_count: int = 50):
     Analyze closed signals to identify which scoring components correlate with wins.
     Only computes feedback if the number of closed signals exceeds `min_count` to prevent overfitting to small samples.
     """
-    async with get_connection() as conn:
-        async with conn.execute("SELECT * FROM signals WHERE status IN ('WIN', 'LOSS', 'PARTIAL_WIN', 'BREAK_EVEN')") as cur:
-            closed = await cur.fetchall()
+    async with get_connection() as conn, conn.execute(
+        "SELECT * FROM signals WHERE status IN ('WIN', 'LOSS', 'PARTIAL_WIN', 'BREAK_EVEN')"
+    ) as cur:
+        closed = await cur.fetchall()
 
     if len(closed) < min_count:
         logger.info(f"Not enough closed signals to compute feedback (found {len(closed)}, need {min_count})")
@@ -36,7 +37,7 @@ async def compute_signal_feedback(min_count: int = 50):
         # Consider WIN and PARTIAL_WIN as a successful directional setup
         is_win = status in ("WIN", "PARTIAL_WIN")
 
-        for component, val in breakdown.items():
+        for component, _val in breakdown.items():
             if component not in stats:
                 stats[component] = {"wins": 0, "total": 0}
             

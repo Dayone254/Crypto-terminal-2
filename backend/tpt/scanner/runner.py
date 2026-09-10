@@ -17,6 +17,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
 from sqlalchemy import select
@@ -75,7 +76,9 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
     from tpt.data.database import get_connection
 
     four_hours_ago = int(time.time()) - (4 * 3600)
-    async with db_write_lock:
+    # Kept as separate statements (not combined) so the write-lock scope is
+    # explicit at a glance — it is the crux of SQLite write serialization.
+    async with db_write_lock:  # noqa: SIM117
         async with get_connection() as conn:
             inserted = 0
             for row in rows:
@@ -254,7 +257,9 @@ async def run_scan(
             except Exception as exc:
                 logger.warning("Regime detection failed: %s", exc)
 
-        async with db_write_lock:
+        # Kept as separate statements (not combined) so the write-lock scope is
+        # explicit at a glance — it is the crux of SQLite write serialization.
+        async with db_write_lock:  # noqa: SIM117
             async with AsyncSessionLocal() as db:
                 # --- Symbol catalog upsert ---
                 for p in products:
@@ -389,9 +394,9 @@ async def run_scan(
                     # Post-ladder validation: ENTRY_ZONE iff price sits within 0.75% of tranche A
                     if ladder_dict and primary_label not in ("SKIP", "CHASE"):
                         t_a = ladder_dict.get("tranche_a_price")
-                        last_p = feats.get("last_price")
-                        if t_a and last_p:
-                            if abs(float(last_p) - float(t_a)) / float(t_a) <= 0.0075:
+                        current_price = feats.get("last_price")
+                        if t_a and current_price:
+                            if abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075:
                                 primary_label = "ENTRY_ZONE"
                             elif primary_label == "ENTRY_ZONE":
                                 primary_label = "COILED"
@@ -497,6 +502,44 @@ async def run_scan(
                                 "tp": san["target_1_price"],
                                 "sl": san["stop_price"],
                             })
+
+                # --- Alerts: zone entry / invalidation + watch lifecycle ---
+                # Persisted in the same transaction as the scan results.
+                try:
+                    from datetime import datetime, timedelta
+
+                    from sqlalchemy import select as _select
+
+                    from tpt.alerting.alerter import generate_alerts, persist_alerts
+                    from tpt.db.models import Alert, Watch
+
+                    watch_res = await db.execute(_select(Watch).where(Watch.is_active == 1))
+                    active_watches = {
+                        (w.product_id, w.zone): {"product_id": w.product_id, "zone": w.zone}
+                        for w in watch_res.scalars().all()
+                    }
+
+                    cutoff = (
+                        datetime.now(UTC)
+                        - timedelta(hours=cfg.alerts.dedupe_hours)
+                    ).isoformat()
+                    dedupe_res = await db.execute(
+                        _select(Alert.dedupe_key).where(Alert.created_at >= cutoff)
+                    )
+                    recent_keys = set(dedupe_res.scalars().all())
+
+                    alert_records = generate_alerts(
+                        candidates_out,
+                        active_watches,
+                        cfg.alerts,
+                        now_utc=datetime.now(UTC),
+                        recent_dedupe_keys=recent_keys,
+                    )
+                    written = await persist_alerts(db, alert_records, scan_run_id)
+                    if written:
+                        logger.info("Recorded %d alert event(s).", written)
+                except Exception as exc:
+                    logger.warning("Alert generation failed: %s", exc)
 
                 # === THE FIX: commit the scan results ===
                 # Without this the AsyncSession closes and rolls back every

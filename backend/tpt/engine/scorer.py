@@ -190,7 +190,8 @@ def score(
             opt = ws_memory.get_macro_options(pid.split("-")[0])
             if opt:
                 iv_skew = float(opt.get("iv_skew", 0.0))
-                if opt.get("gamma_walls"): gamma_wall_proximity = 0.01
+                if opt.get("gamma_walls"):
+                    gamma_wall_proximity = 0.01
         
         # Build strict 1D native array to bypass heavy Pandas allocations inside asyncio loop
         X = np.array([[
@@ -243,11 +244,13 @@ def score(
         interactions += config.interaction_bonuses.breakout_bonus
 
     # 3. Regime Modifiers
-    # Penalize fighting the macro trend severely
-    if not norm.get("trend_aligned", 0.0) and regime in ["TRENDING_UP", "TRENDING_DOWN"]:
-        # E.g. Shorting during TRENDING_UP
-        if (regime == "TRENDING_UP" and trade_direction == "SHORT") or (regime == "TRENDING_DOWN" and trade_direction == "LONG"):
-            interactions -= config.counter_trend_penalty
+    # Shorting into TRENDING_UP (or longing into TRENDING_DOWN) fights the macro trend.
+    counter_trend = (
+        (regime == "TRENDING_UP" and trade_direction == "SHORT")
+        or (regime == "TRENDING_DOWN" and trade_direction == "LONG")
+    )
+    if counter_trend and not norm.get("trend_aligned", 0.0):
+        interactions -= config.counter_trend_penalty
 
     # 4. Institutional Perpetuals Filter (Over-leveraged Liquidation Squeezes)
     fr = features.get("funding_rate")

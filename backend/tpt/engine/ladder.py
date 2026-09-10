@@ -38,11 +38,11 @@ def compute_ladder(
         return None
 
     stop_pct = config.stop_pct / 100.0 if config else 0.03
-    ext_pct = config.target2_extension_pct / 100.0 if config else 0.05
+    config.target2_extension_pct / 100.0 if config else 0.05
 
     last_price = float(features.get("last_price") or 0.0)
-    day_high = float(features.get("day_high") or last_price)
-    day_low = float(features.get("day_low") or last_price)
+    float(features.get("day_high") or last_price)
+    float(features.get("day_low") or last_price)
     vwap = float(features.get("vwap_24h") or last_price)
     
     atr_1h = float(features.get("atr_1h") or 0.0)

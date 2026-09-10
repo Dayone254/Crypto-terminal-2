@@ -104,6 +104,36 @@ make format
 make typecheck
 ```
 
+## Project status & known limitations
+
+**Working**
+- Scheduled + on-demand scanning (`SCAN_INTERVAL_SECONDS`), with the scan results
+  committed to SQLite and surfaced through `/api/v1/markets`.
+- Config-driven scoring from `config/strategy.yaml`, hot-reloaded per scan run,
+  with runtime weight overrides persisted via `PATCH /api/v1/config/scoring`.
+- Limit-order ladders, labels/tags, and the backtest ledger + evaluator daemon.
+- Alerting: zone entry/invalidation detection, watch lifecycle, dedupe keys,
+  quiet hours, and the morning digest (`tpt/alerting/`). Telegram setup alerts.
+- Alembic migrations (`make db-migrate`); the DB path comes from `DATABASE_URL`.
+
+**Scoring & options flow**
+- The config-driven strategy is the default for **all** symbols.
+- Options-flow inputs (gamma walls, IV skew) only exist for underlyings with an
+  options chain (BTC/ETH). For every other symbol those interactions are simply
+  skipped, which is correct — they are *not* fed as neutral/zero values.
+- The XGBoost model is **opt-in and off by default** (`ENABLE_ML_SCORING=true`).
+  It hard-codes options inputs, so enabling it mis-scores non-options symbols.
+
+**Security posture**
+- The API binds to `127.0.0.1` by default and CORS is restricted to
+  `FRONTEND_URL`. There is **no authentication** unless you set `API_TOKEN`
+  (the UI reads `NEXT_PUBLIC_API_TOKEN`). Do not bind to `0.0.0.0` without it.
+
+**Not built / not covered**
+- No frontend test suite (type-check + production build only).
+- `tpt/engine/feedback.py` (component hit-rate feedback) is not wired into the
+  scoring loop.
+
 ## Non-goals (v1)
 
 - No auto-trading or order placement

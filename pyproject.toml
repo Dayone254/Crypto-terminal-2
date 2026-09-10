@@ -53,7 +53,12 @@ src = ["backend"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+ignore = [
+    "E501",
+    # B008: FastAPI's Depends()/Query() idiom is a function call in a default
+    # argument by design, so this rule is a false positive for this codebase.
+    "B008",
+]
 
 [tool.mypy]
 python_version = "3.12"

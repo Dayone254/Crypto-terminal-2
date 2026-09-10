@@ -86,11 +86,10 @@ class CoinbaseAdapter(ExchangeAdapter):
             async with self.semaphore:
                 try:
                     response = await client.get(url, params=params)
-                    if response.status_code == 429:
-                        if attempt < max_retries:
-                            backoff = min(60.0, (2.0 ** attempt) * 2.0)
-                            await asyncio.sleep(backoff)
-                            continue
+                    if response.status_code == 429 and attempt < max_retries:
+                        backoff = min(60.0, (2.0 ** attempt) * 2.0)
+                        await asyncio.sleep(backoff)
+                        continue
                     response.raise_for_status()
                     return response.json()
                 except (httpx.HTTPStatusError, httpx.RequestError) as exc:

@@ -51,8 +51,6 @@ async def calculate_macro_gamma_exposure(underlying: str, spot_price: float) -> 
         # Risk-free rate assumption (Standard baseline 5% = 0.05)
         R_F = 0.05
         
-        highest_gamma_strike = 0
-        max_gamma = -9999999999.0
         
         for opt in board:
             open_interest = opt["open_interest"]
