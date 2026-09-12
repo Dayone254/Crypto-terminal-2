@@ -24,9 +24,14 @@ def compute_ladder(
     trade_direction: str = "LONG",
     regime: str = "TRENDING_UP",
     base_position: float = 100.0,
+    target_r: float | None = None,
 ) -> LadderDict | None:
     """Compute limit-order ladder levels for a candidate symbol.
-    
+
+    ``target_r`` is the calibrated distance to Target 1, in R multiples, from
+    ``engine.exits``. When None the historical 2.0R default applies. Passing a
+    measured value is how the ladder stops publishing a floor no trade can reach.
+
     Returns None if:
     - label is SKIP or CHASE (absolute block, even if pinned)
     - label is WATCH and symbol is not pinned
@@ -38,21 +43,51 @@ def compute_ladder(
         return None
 
     stop_pct = config.stop_pct / 100.0 if config else 0.03
-    config.target2_extension_pct / 100.0 if config else 0.05
+
+    # Target-1 distance in R. 2.0 is the historical floor; a calibrated value
+    # replaces it. Target 2 keeps its 2x relationship to T1, so only the scale of
+    # the ladder changes, not its shape.
+    t1_mult = float(target_r) if target_r and target_r > 0 else 2.0
+    t2_mult = t1_mult * 2.0
+    max_t2_mult = 8.0
+
+    # Risk bounds, ATR-derived. The previous logic allowed a flat 5% clamp, which
+    # on an asset whose whole favourable excursion is 1-3% made every R-multiple
+    # target unreachable. Bounds that scale with the instrument's own volatility
+    # mean R means roughly the same thing across 400 assets.
+    atr_stop_mult = config.atr_stop_mult if config else 1.5
+    min_risk_pct = config.min_stop_pct if config else 1.0
+    max_risk_pct = config.max_stop_pct if config else 3.0
 
     last_price = float(features.get("last_price") or 0.0)
-    float(features.get("day_high") or last_price)
-    float(features.get("day_low") or last_price)
     vwap = float(features.get("vwap_24h") or last_price)
     
     atr_1h = float(features.get("atr_1h") or 0.0)
     atr_pct = (atr_1h / last_price * 100.0) if last_price > 0 else 2.0
+
+    # The instrument's own risk unit, in percent. `atr_pct` is the 1h ATR as a
+    # share of spot — how far this asset actually travels in an hour — which is
+    # the only honest basis for how wide the stop should be. Bounded at both ends:
+    # wide enough not to sit inside the noise, tight enough that R stays a
+    # meaningful fraction of the move the asset can deliver.
+    if atr_pct > 0:
+        atr_risk_pct = max(min_risk_pct, min(max_risk_pct, atr_stop_mult * atr_pct))
+    else:
+        # No ATR to scale by. Fall back to the configured static stop rather than
+        # the narrowest bound, which would place the stop inside the noise on the
+        # one asset whose volatility we cannot see.
+        atr_risk_pct = max(min_risk_pct, min(max_risk_pct, stop_pct * 100.0))
+    risk_frac = atr_risk_pct / 100.0
     
     # Position Sizing
-    vol_scale = max(0.3, min(1.0, 1.0 - (atr_pct / 10.0)))
+    # Fix 3: Constant-dollar risk sizing. Base position represents account equity.
+    # Risk budget is scaled by confidence and regime, then divided by risk distance.
+    risk_per_trade_pct = 0.03  # 3% maximum risk of base_position equity
     confidence = max(0.0, min(1.0, (composite_score - 50.0) / 50.0))
     regime_mult = {"TRENDING_UP": 1.0, "TRENDING_DOWN": 1.0, "RANGING": 0.85, "VOLATILE": 0.6}.get(regime, 1.0)
-    total_size_usd = round(base_position * vol_scale * confidence * regime_mult, 2)
+    
+    risk_budget = (base_position * risk_per_trade_pct) * confidence * regime_mult
+    total_size_usd = round(risk_budget / max(0.0001, risk_frac), 2)
 
     # Dynamic tranche scaling (scale into conviction strongly)
     if composite_score >= 80:
@@ -90,13 +125,12 @@ def compute_ladder(
         if tranche_b <= tranche_a:
             tranche_b = tranche_a * 1.04
 
-        # 3. SHORT Stop Loss
-        # 3. SHORT Stop Loss (Tight clamp to max 3.0% risk of tranche_a)
+        # 3. SHORT Stop Loss — structural where the book offers one, then bounded
+        # into the instrument's own risk unit.
         stop_price = tranche_b * (1.0 + stop_pct)
         basis_stop = "Static Fallback (+3%)"
 
         l2_asks = features.get("l2_asks", [])
-        atr_14d = features.get("atr_14d")
 
         if l2_asks:
             lb_stop = tranche_b * 1.01
@@ -108,26 +142,37 @@ def compute_ladder(
                 if w_price * w_size >= 50_000:
                     stop_price = w_price * 1.0001
                     basis_stop = f"Tucked above ${w_price:,.4f} (+${(w_price * w_size)/1000:,.0f}k Wall)"
-            elif atr_14d and atr_14d > 0:
-                stop_price = tranche_b + (atr_14d * 2.0)
-                basis_stop = f"ATR Fallback (2x = ${atr_14d*2:,.4f})"
 
-        # Clamp risk to max 5.5% of tranche_a for volatile crypto asset volatility
-        if (stop_price - tranche_a) > tranche_a * 0.055:
-            stop_price = tranche_a * 1.05
+        # Bound the risk into [min, ATR-scaled max]. This replaces the old flat 5%
+        # clamp: on an asset whose entire favourable excursion is 1-3%, a 5% stop
+        # left R so wide that every R-multiple target was out of reach.
+        risk_dist = stop_price - tranche_a
+        min_dist = tranche_a * (min_risk_pct / 100.0)
+        max_dist = tranche_a * risk_frac
+        if risk_dist > max_dist:
+            stop_price = tranche_a + max_dist
+            basis_stop = f"Risk bounded to {atr_risk_pct:.2f}% (ATR-scaled, was wider)"
+        elif risk_dist < min_dist:
+            stop_price = tranche_a + min_dist
+            basis_stop = f"Risk widened to {min_risk_pct:.2f}% floor"
+        # Tranche B is a second sell above A, so it must sit *below* the stop.
+        # Clamping the stop inward can otherwise leave the second entry outside it.
+        if tranche_b >= stop_price:
             tranche_b = (tranche_a + stop_price) / 2.0
-            basis_stop = "Risk Clamp (+5%)"
 
-        risk = stop_price - tranche_a if stop_price > tranche_a else tranche_a * 0.03
+        risk = (stop_price - tranche_a) if stop_price > tranche_a else tranche_a * (min_risk_pct / 100.0)
 
-        # 4. SHORT Target 1 (Strictly 1:2.0 R/R Floor) & Target 2 (Strictly 1:4.0 R/R to 1:8.0 R/R)
-        min_t1 = tranche_a - (2.0 * risk)
-        target_1 = min_t1
-        basis_t1 = "Minimum 2.0R Target Floor"
+        # 4. SHORT Target 1 — calibrated multiple when we have one, else the floor.
+        target_1 = tranche_a - (t1_mult * risk)
+        basis_t1 = (
+            f"{t1_mult:.2f}R Target (calibrated from realised excursions)"
+            if target_r
+            else "Minimum 2.0R Target Floor"
+        )
 
-        # Target 2: Extend to 4.0R to 8.0R
-        max_t2_price = tranche_a - (8.0 * risk)
-        target_2 = tranche_a - (4.0 * risk)
+        # Target 2: keeps its 2x relationship to T1, capped at 8R.
+        max_t2_price = tranche_a - (max_t2_mult * risk)
+        target_2 = tranche_a - (t2_mult * risk)
         
         # L2 Target Interception for SHORT (looking for Buy Walls below entry)
         l2_bids = features.get("l2_bids", [])
@@ -184,10 +229,9 @@ def compute_ladder(
 
         stop_price = tranche_b * (1.0 - stop_pct)
         basis_stop = "Static Fallback (-3%)"
-        
+
         l2_bids = features.get("l2_bids", [])
-        atr_14d = features.get("atr_14d")
-        
+
         if l2_bids:
             lb_stop = tranche_b * 0.96
             ub_stop = tranche_b * 0.99
@@ -198,24 +242,33 @@ def compute_ladder(
                 if w_price * w_size >= 50_000:
                     stop_price = w_price * 0.9999
                     basis_stop = f"Sunk below ${w_price:,.4f} (+${(w_price * w_size)/1000:,.0f}k Wall)"
-            elif atr_14d and atr_14d > 0:
-                stop_price = tranche_b - (atr_14d * 2.0)
-                basis_stop = f"ATR Fallback (2x = ${atr_14d*2:,.4f})"
 
-        # Clamp risk to max 5.5% of tranche_a for volatile crypto asset volatility
-        if (tranche_a - stop_price) > tranche_a * 0.055:
-            stop_price = tranche_a * 0.95
+        # Bound the risk into [min, ATR-scaled max] — see the SHORT branch.
+        risk_dist = tranche_a - stop_price
+        min_dist = tranche_a * (min_risk_pct / 100.0)
+        max_dist = tranche_a * risk_frac
+        if risk_dist > max_dist:
+            stop_price = tranche_a - max_dist
+            basis_stop = f"Risk bounded to {atr_risk_pct:.2f}% (ATR-scaled, was wider)"
+        elif risk_dist < min_dist:
+            stop_price = tranche_a - min_dist
+            basis_stop = f"Risk widened to {min_risk_pct:.2f}% floor"
+        # Tranche B is a second buy below A, so it must sit *above* the stop.
+        if tranche_b <= stop_price:
             tranche_b = (tranche_a + stop_price) / 2.0
-            basis_stop = "Risk Clamp (-5%)"
 
-        risk = (tranche_a - stop_price) if tranche_a > stop_price else tranche_a * 0.03
+        risk = (tranche_a - stop_price) if tranche_a > stop_price else tranche_a * (min_risk_pct / 100.0)
 
-        # LONG Target 1 (Strictly 1:2.0 R/R Floor) & Target 2 (Strictly 1:4.0 R/R to 1:8.0 R/R)
-        target_1 = tranche_a + (2.0 * risk)
-        basis_t1 = "Minimum 2.0R Target Extension"
-        
-        max_t2_price = tranche_a + (8.0 * risk)
-        target_2 = tranche_a + (4.0 * risk)
+        # LONG Target 1 — calibrated multiple when available, else the floor.
+        target_1 = tranche_a + (t1_mult * risk)
+        basis_t1 = (
+            f"{t1_mult:.2f}R Target (calibrated from realised excursions)"
+            if target_r
+            else "Minimum 2.0R Target Extension"
+        )
+
+        max_t2_price = tranche_a + (max_t2_mult * risk)
+        target_2 = tranche_a + (t2_mult * risk)
         
         # L2 Target Interception for LONG (looking for Sell Walls above entry)
         l2_asks = features.get("l2_asks", [])
@@ -255,8 +308,14 @@ def compute_ladder(
         rr_a_t2 = (target_2 - tranche_a) / risk if risk > 0 else 0.0
         basis_str_info = {"fib_mid": round(fib_mid, 8), "vwap_pocket": round(vwap_pocket, 8), "fib_786": round(fib_786, 8)}
 
-    # R/R Structural Filter Constraint (Minimum 1.85R required to allow for L2 wall front-running)
-    if rr_a_t1 < 1.85 and not pinned:
+    # R/R structural filter. The floor exists so the ladder never publishes a poor
+    # payoff — but a fixed 1.85R floor is also what made every target unreachable
+    # once the realised excursion proved to be under 1R. When a target has been
+    # calibrated, the measurement supersedes the constant.
+    min_rr = 1.85
+    if target_r and target_r > 0:
+        min_rr = min(min_rr, float(target_r))
+    if rr_a_t1 < min_rr and not pinned:
         return None
 
     basis_dict = {
@@ -277,6 +336,10 @@ def compute_ladder(
         "total_size_usd": total_size_usd,
         "rr_a_t1": round(rr_a_t1, 2),
         "rr_a_t2": round(rr_a_t2, 2),
+        # Carried on the ladder itself so `sanitize_ladder_dict` — which runs over
+        # persisted and historical ladders too — honours the calibrated multiple
+        # instead of forcing T1 back out to its hardcoded 2.0R.
+        "target_r": round(t1_mult, 3),
         "basis": basis_dict,
         "trade_direction": trade_direction,
     }
@@ -312,6 +375,15 @@ def format_ladder_text(
     rr2 = ladder.get("rr_a_t2", 0.0)
     dir_str = ladder.get("trade_direction", "LONG")
 
+    # The tranche split is dynamic (70/30 above a score of 80, 60/40 above 65),
+    # so labelling every ladder "60%/40%" told the operator something the plan
+    # did not say. Same for the fixed "(4.0R Ext)" on a target that is often
+    # well beyond 4R by the time the risk clamp and wall front-running land.
+    a_pct = ladder.get("tranche_a_size_pct", 60)
+    b_pct = ladder.get("tranche_b_size_pct", 40)
+    a_pct_s = f"{a_pct:.0f}" if isinstance(a_pct, (int, float)) else "60"
+    b_pct_s = f"{b_pct:.0f}" if isinstance(b_pct, (int, float)) else "40"
+
     basis = ladder.get("basis", {})
     basis_str = f"VWAP pocket {_fmt(basis.get('vwap_pocket'))} + Macro {_fmt(basis.get('fib_786'))}"
     stop_lgc = basis.get('stop_logic', '')
@@ -320,19 +392,26 @@ def format_ladder_text(
     lines = [
         f"[{product_id}] - {lbl} [{dir_str}] (Score: {score_val:.0f})",
         "-" * 40,
-        f"Tranche A (60%): {tr_a:<10} | R/R T1: {rr1:.2f}R",
-        f"Tranche B (40%): {tr_b:<10} | R/R T2: {rr2:.2f}R",
+        f"Tranche A ({a_pct_s}%): {tr_a:<10} | R/R T1: {rr1:.2f}R",
+        f"Tranche B ({b_pct_s}%): {tr_b:<10} | R/R T2: {rr2:.2f}R",
         f"Stop Loss:       {stop_p:<10} {stop_lgc}",
         "-" * 40,
         f"Target 1:        {t1:<10} {tp1_lgc}",
-        f"Target 2:        {t2:<10} (4.0R Ext)",
+        f"Target 2:        {t2:<10} ({rr2:.2f}R Ext)",
         f"Basis: {basis_str}",
     ]
     return "\n".join(lines)
 
 
 def sanitize_ladder_dict(lad_dict: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Sanitize any ladder dictionary (active or historical) to guarantee 1:2.0R to 1:8.0R institutional constraints."""
+    """Bring any ladder dict (active or historical) onto institutional footing.
+
+    T1 sits at ``target_r`` multiples of risk, T2 at twice that, both bounded by
+    the 1R-8R envelope the ladder works in. ``target_r`` is read off the ladder
+    when present so a calibrated target survives this function — it previously
+    hardcoded 2.0 and so silently overrode any calibration back to an unreachable
+    distance. Ladders written before the field existed keep the 2.0 default.
+    """
     if not lad_dict or not lad_dict.get("tranche_a_price"):
         return lad_dict
 
@@ -347,46 +426,59 @@ def sanitize_ladder_dict(lad_dict: dict[str, Any] | None) -> dict[str, Any] | No
 
         is_short = stop > tranche_a
 
+        # The calibrated multiple, clamped to the envelope the ladder works in.
+        try:
+            target_r = float(lad_dict.get("target_r") or 2.0)
+        except (TypeError, ValueError):
+            target_r = 2.0
+        target_r = max(0.1, min(8.0, target_r))
+
+        # Loose backstop only — compute_ladder already bounds risk to the
+        # ATR-derived band. This catches hand-written or historical rows.
+        max_risk_frac = 0.055
+
         if is_short:
             risk = stop - tranche_a
-            # Clamp loose stop loss to max 5.5% of tranche_a (matches compute_ladder threshold)
-            if risk > tranche_a * 0.055:
-                risk = tranche_a * 0.055
+            if risk > tranche_a * max_risk_frac:
+                risk = tranche_a * max_risk_frac
                 stop = tranche_a + risk
                 lad_dict["stop_price"] = round(stop, 8)
 
-            min_t1 = tranche_a - (2.0 * risk)
+            min_t1 = tranche_a - (target_r * risk)
             if t1 > min_t1 or t1 <= 0:
                 lad_dict["target_1_price"] = round(min_t1, 8)
                 t1 = min_t1
 
-            min_t2 = tranche_a - (4.0 * risk)
+            min_t2 = tranche_a - (target_r * 2.0 * risk)
             if t2 > t1 or t2 <= 0:
                 lad_dict["target_2_price"] = round(min_t2, 8)
                 t2 = min_t2
 
-            lad_dict["rr_a_t1"] = round(abs(tranche_a - t1) / risk, 2) if risk > 0 else 2.0
-            lad_dict["rr_a_t2"] = round(abs(tranche_a - t2) / risk, 2) if risk > 0 else 4.0
+            lad_dict["rr_a_t1"] = round(abs(tranche_a - t1) / risk, 2) if risk > 0 else target_r
+            lad_dict["rr_a_t2"] = (
+                round(abs(tranche_a - t2) / risk, 2) if risk > 0 else target_r * 2.0
+            )
         else:
             risk = tranche_a - stop
-            # Clamp loose stop loss to max 5.5% of tranche_a (matches compute_ladder threshold)
-            if risk > tranche_a * 0.055:
-                risk = tranche_a * 0.055
+            if risk > tranche_a * max_risk_frac:
+                risk = tranche_a * max_risk_frac
                 stop = tranche_a - risk
                 lad_dict["stop_price"] = round(stop, 8)
 
-            min_t1 = tranche_a + (2.0 * risk)
+            min_t1 = tranche_a + (target_r * risk)
             if t1 < min_t1 or t1 <= 0:
                 lad_dict["target_1_price"] = round(min_t1, 8)
                 t1 = min_t1
 
-            min_t2 = tranche_a + (4.0 * risk)
+            min_t2 = tranche_a + (target_r * 2.0 * risk)
             if t2 < t1 or t2 <= 0:
                 lad_dict["target_2_price"] = round(min_t2, 8)
                 t2 = min_t2
 
-            lad_dict["rr_a_t1"] = round(abs(t1 - tranche_a) / risk, 2) if risk > 0 else 2.0
-            lad_dict["rr_a_t2"] = round(abs(t2 - tranche_a) / risk, 2) if risk > 0 else 4.0
+            lad_dict["rr_a_t1"] = round(abs(t1 - tranche_a) / risk, 2) if risk > 0 else target_r
+            lad_dict["rr_a_t2"] = (
+                round(abs(t2 - tranche_a) / risk, 2) if risk > 0 else target_r * 2.0
+            )
 
     except Exception:
         pass

@@ -98,7 +98,8 @@ class LadderConfig(BaseModel):
     # target was unreachable.
     atr_stop_mult: float = 1.5   # risk = this many 1h ATRs, before bounding
     min_stop_pct: float = 1.0    # percent of entry: never stop inside the noise
-    max_stop_pct: float = 3.0    # percent of entry: never so wide R dwarfs the move
+    # Fix 3: Loosen the ATR stop clamp based on Avg MAE of -4.39% 
+    max_stop_pct: float = 6.0    # percent of entry: never so wide R dwarfs the move
 
     # ── Exit management ──────────────────────────────────────────────────────
     # Break-even arming, in R: the stop moves to entry once the trade has earned
