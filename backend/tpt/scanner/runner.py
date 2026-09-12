@@ -152,8 +152,8 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
                     continue
                 await conn.execute(
                     """INSERT INTO signals
-                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price)
-                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price, pipeline_version)
+                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     row,
                 )
                 inserted += 1
@@ -649,6 +649,7 @@ async def _execute_scan(
                         san["target_1_price"],
                         san.get("target_2_price") or san["target_1_price"],
                         san["stop_price"],
+                        "v2.0"
                     ))
                     telegram_alerts.append({
                         "symbol": pid,

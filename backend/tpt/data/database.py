@@ -32,6 +32,29 @@ _SIGNALS_COLUMNS = [
     ("partial_exit_price", "REAL"),
     ("final_status", "TEXT"),
     ("trail_sl", "REAL"),
+    ("pipeline_version", "TEXT DEFAULT 'v1.0'"),
+]
+
+# Additive migrations for the ORM-managed tables. `Base.metadata.create_all`
+# creates *missing tables* but never alters an existing one, so a new column on
+# `features` / `scores` has to be added explicitly — same idiom as signals.
+_FEATURE_COLUMNS = [
+    # The complete input set the scorer read, so a score can be replayed later.
+    ("feature_vector", "TEXT"),
+    ("feature_version", "TEXT"),
+]
+
+_SCORE_COLUMNS = [
+    ("edge", "REAL"),
+    ("coverage", "REAL"),
+    ("rank_key", "REAL"),
+    ("model_version", "TEXT"),
+]
+
+_LADDER_COLUMNS = [
+    # The calibrated Target-1 multiple. Without this the read paths rebuild the
+    # ladder without it, and `sanitize_ladder_dict` restores the 2.0R default.
+    ("target_r", "REAL"),
 ]
 
 
@@ -64,7 +87,8 @@ async def init_db():
                 partial_exit_at INTEGER,
                 partial_exit_price REAL,
                 final_status TEXT,
-                trail_sl REAL
+                trail_sl REAL,
+                pipeline_version TEXT DEFAULT 'v1.0'
             )
             """
         )
@@ -83,6 +107,16 @@ async def init_db():
             # Column already exists on an up-to-date database.
             with contextlib.suppress(Exception):
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col} {definition}")
+        # Same treatment for the ORM tables, which CREATE TABLE IF NOT EXISTS
+        # cannot retrofit.
+        for table, columns in (
+            ("features", _FEATURE_COLUMNS),
+            ("scores", _SCORE_COLUMNS),
+            ("ladders", _LADDER_COLUMNS),
+        ):
+            for col, definition in columns:
+                with contextlib.suppress(Exception):
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
         # Indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
