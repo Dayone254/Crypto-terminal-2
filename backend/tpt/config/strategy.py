@@ -59,7 +59,6 @@ class ScoringConfig(BaseModel):
     baseline: int = 50
     component_weights: ComponentWeights = Field(default_factory=ComponentWeights)
     interaction_bonuses: InteractionBonuses = Field(default_factory=InteractionBonuses)
-    counter_trend_penalty: float = 15.0
     # Graded replacement for the old hard SKIP on a hostile BTC push. Points
     # removed at full headwind, and the thrust (percent) at which it saturates.
     # A penalty rather than a veto, so an exceptional setup can still qualify:

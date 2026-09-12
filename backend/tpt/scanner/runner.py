@@ -30,18 +30,70 @@ from sqlalchemy import select
 
 from tpt.adapters.coinbase import CoinbaseAdapter
 from tpt.config.settings import settings
-from tpt.config.strategy import load_strategy
+from tpt.config.strategy import StrategyConfig, load_strategy
+from tpt.data.database import get_connection
 from tpt.db.connection import AsyncSessionLocal, init_db
 from tpt.db.models import Feature, Ladder, ScanRun, Score, Snapshot, Symbol, new_uuid, utcnow_iso
 from tpt.db.write_lock import db_write_lock
-from tpt.engine.features import compute_features
+from tpt.engine.belief import FEATURE_VERSION, serialize_feature_vector
+from tpt.engine.exits import TargetEstimate, calibrate_targets
+from tpt.engine.features import FeatureDict, compute_features, multi_horizon_returns
 from tpt.engine.labeler import compute_tags, label
 from tpt.engine.ladder import compute_ladder, sanitize_ladder_dict
-from tpt.engine.scorer import score
+from tpt.engine.regime import beta_state_from_thrust, detect_regime, macro_thrust
+from tpt.engine.scorer import ScoreBreakdown, score
 from tpt.engine.ws_broadcaster import ui_stream
 from tpt.engine.ws_memory import ws_memory
 
 logger = logging.getLogger(__name__)
+
+
+def _pick_direction(
+    feats: FeatureDict,
+    cfg: StrategyConfig,
+    regime: str = "TRENDING_UP",
+    macro_thrust: float = 0.0,
+) -> tuple[str, ScoreBreakdown]:
+    """Score both directions and pick one, with the trend guard.
+
+    Shared by the triage passes and the final scoring pass so they agree on how a
+    symbol would be traded — a disagreement would mean spending candle budget on
+    symbols the final pass then reverses. The cheap pass has no candle data yet,
+    so it estimates the macro push from BTC's 24h change alone; everything after
+    the candle fetch uses the full thrust.
+    """
+    long_score = score(feats, cfg.scoring, trade_direction="LONG", regime=regime, macro_thrust=macro_thrust)
+    short_score = score(feats, cfg.scoring, trade_direction="SHORT", regime=regime, macro_thrust=macro_thrust)
+
+    day_chg = float(feats.get("day_change_pct") or 0.0)
+    is_short_allowed = True
+    if day_chg > 3.0 and (short_score["clamped"] - long_score["clamped"]) < 20.0:
+        is_short_allowed = False
+
+    if is_short_allowed and short_score["clamped"] > long_score["clamped"]:
+        return "SHORT", short_score
+    return "LONG", long_score
+
+
+async def _calibrated_target() -> TargetEstimate:
+    """Where should Target 1 sit? Answered from the ledger, not from a constant.
+
+    Reads **closed** trades only. An open signal records zero excursion, which
+    means "not measured yet" rather than "went nowhere", and feeding those in
+    would drag every reach probability toward zero.
+    """
+    sql = (
+        "SELECT entry_price, sl_price, mfe, mae FROM signals "
+        "WHERE status IN ('WIN', 'LOSS', 'BREAK_EVEN', 'PARTIAL_WIN')"
+    )
+    try:
+        async with get_connection() as conn, conn.execute(sql) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    except Exception as exc:
+        logger.warning("Exit calibration read failed: %s", exc)
+        return calibrate_targets([])
+
+    return calibrate_targets(rows)
 
 
 def extract_l2_vol(l2_book: dict[str, Any], spot_price: float) -> tuple[float, float]:
@@ -152,6 +204,32 @@ async def _execute_scan(
     # edits take effect without restarting the process.
     cfg = load_strategy()
 
+    # Target calibration from realised excursions — Fix for the frozen win rate.
+    #
+    # The ladder placed T1 at a constant 2.0R derived from an R/R floor, while the
+    # best favourable excursion ever recorded across 22 closed trades was 0.72R.
+    # No trade could reach its target, so `WIN` was arithmetically impossible and
+    # the edge page's 0% was a fact about the target, not about the market.
+    #
+    # Read once per scan: the estimate is a property of the ledger, not of any
+    # single symbol.
+    calibration = await _calibrated_target()
+    target_r = calibration.r_multiple
+    if target_r is not None:
+        logger.info(
+            "Exit calibration: T1 at %.2fR from %d closed trade(s) [%s]%s",
+            target_r,
+            calibration.n,
+            "provisional" if calibration.provisional else "firm",
+            f" — {calibration.reason}" if calibration.reason else "",
+        )
+    else:
+        logger.info(
+            "Exit calibration: no target published (n=%d) — T1 falls back to the 2.0R default. %s",
+            calibration.n,
+            calibration.reason or "",
+        )
+
     own_adapter = adapter is None
     if adapter is None:
         adapter = CoinbaseAdapter()
@@ -203,7 +281,16 @@ async def _execute_scan(
             else:
                 stale_symbols.add(pid)
 
-        # 3. Identify Phase 2 candle candidates from stats alone
+        # 3. Cost-tiered triage, pass 1 — who earns the candle budget.
+        #
+        #    The previous filter was a hand-written rule over day_change and
+        #    volume, which is how 91.5% of the universe ended up scored with no
+        #    candle data at all: the brain was ranking symbols it had barely
+        #    looked at. Instead, score every symbol on the features that are free
+        #    (24h stats only) and buy candles for the strongest. Ranking on
+        #    `rank_key` is the point — it shrinks a thinly-observed symbol toward
+        #    neutral, so the budget goes to symbols the cheap features can
+        #    actually speak to rather than to whatever moved most today.
         btc_stats = stats_map.get("BTC-USD")
         btc_day_change: float | None = None
         if btc_stats:
@@ -212,31 +299,31 @@ async def _execute_scan(
             if b_open > 0:
                 btc_day_change = ((b_last - b_open) / b_open) * 100.0
 
-        min_vol = cfg.labeling.min_quote_volume
-        candle_candidates: set[str] = {"BTC-USD"}
-
+        cheap_rank: list[tuple[float, str]] = []
+        # Only BTC's 24h change is available before the candle fetch; the full
+        # thrust (SMA distance plus day change) is computed once candles land.
+        cheap_thrust = macro_thrust(btc_day_change_pct=btc_day_change)
         for pid in product_ids:
             if pid in stale_symbols:
                 continue
             st = stats_map[pid]
-            last = float(st.get("last") or st.get("price") or 0.0)
-            open_p = float(st.get("open") or last)
-            high_p = float(st.get("high") or last)
-            low_p = float(st.get("low") or last)
-            vol_base = float(st.get("volume") or 0.0)
-            quote_vol = vol_base * last
+            cheap_feats = compute_features(
+                raw_stats=st,
+                raw_ticker=st,
+                btc_day_change_pct=btc_day_change,
+            )
+            cheap_feats["product_id"] = pid
+            _cheap_dir, cheap_score = _pick_direction(
+                cheap_feats, cfg, macro_thrust=cheap_thrust
+            )
+            cheap_rank.append((float(cheap_score["rank_key"]), pid))
+        cheap_rank.sort(key=lambda t: t[0], reverse=True)
 
-            # Always fetch candles for pinned symbols
-            if pid in watchlist_set:
-                candle_candidates.add(pid)
-                continue
+        candle_candidates: set[str] = {"BTC-USD"}
+        candle_candidates.update(watchlist_set & set(stats_map))
+        candle_candidates.update(pid for _key, pid in cheap_rank[: settings.candle_triage_top_k])
 
-            if quote_vol >= min_vol:
-                day_change = ((last - open_p) / open_p) * 100.0 if open_p > 0 else 0.0
-                pos_in_range = (last - low_p) / (high_p - low_p) if high_p > low_p else 0.5
-                is_chase = (day_change > 15.0 and pos_in_range > 0.80)
-                if not is_chase and (-3.0 <= day_change <= 8.0 or day_change > 2.0 or quote_vol >= 5_000_000.0):
-                    candle_candidates.add(pid)
+        btc_returns: dict[str, float] = {}
 
         # 4. Phase 2: multi-timeframe candles for candidates
         async def fetch_candles(pid: str) -> tuple[str, Any, Any, Any, Any]:
@@ -272,6 +359,16 @@ async def _execute_scan(
             if c6h is not None:
                 candles_6h_map[pid] = c6h
 
+        # BTC's own multi-horizon returns: the benchmark every symbol's relative
+        # strength is measured against, over identical windows.
+        btc_returns = {
+            k: v
+            for k, v in multi_horizon_returns(
+                candles_1h_map.get("BTC-USD"), candles_1d_map.get("BTC-USD")
+            ).items()
+            if v is not None
+        }
+
         # 5. Phase 3: features, scoring, labeling, laddering.
         # No database session is open in this section, so the write lock is not
         # held across the scan's network I/O.
@@ -283,80 +380,86 @@ async def _execute_scan(
         score_rows: list[dict[str, Any]] = []
         ladder_rows: list[dict[str, Any]] = []
 
-        from tpt.engine.regime import detect_regime
+        # 5b. Features for every symbol, in one pass. Symbols the triage bought
+        #     candles for get the candle-derived components; the rest carry only
+        #     stats-derived ones. That gap is no longer silent — it surfaces as
+        #     `coverage` on the score, and as a lower `rank_key`.
+        feats_map: dict[str, FeatureDict] = {}
+        for pid in product_ids:
+            if pid in stale_symbols:
+                continue
+            st = stats_map[pid]
+            feats = compute_features(
+                raw_stats=st,
+                raw_ticker=st,
+                raw_candles_1h=candles_1h_map.get(pid),
+                raw_candles_1d=candles_1d_map.get(pid),
+                btc_day_change_pct=btc_day_change,
+                raw_candles_15m=candles_15m_map.get(pid),
+                raw_candles_6h=candles_6h_map.get(pid),
+                btc_returns=btc_returns,
+            )
+            feats["product_id"] = pid
+            feats_map[pid] = feats
 
         current_regime = "TRENDING_UP"
-        if "BTC-USD" in stats_map:
+        btc_feats = feats_map.get("BTC-USD")
+        if btc_feats is not None:
             try:
-                st_btc = stats_map["BTC-USD"]
-                btc_feats = compute_features(
-                    raw_stats=st_btc,
-                    raw_ticker=st_btc,
-                    raw_candles_1h=candles_1h_map.get("BTC-USD"),
-                    raw_candles_1d=candles_1d_map.get("BTC-USD"),
-                    btc_day_change_pct=None,
-                    raw_candles_15m=candles_15m_map.get("BTC-USD"),
-                    raw_candles_6h=candles_6h_map.get("BTC-USD"),
-                )
                 current_regime = detect_regime(btc_feats)
             except Exception as exc:
                 logger.warning("Regime detection failed: %s", exc)
 
-        # BTC market-state gate for macro beta protection (pure computation).
-        btc_beta_state = "RANGING"
+        # BTC's macro push as a signed percent, not a three-state flag. The scorer
+        # prices it per symbol and per direction; the discrete label is kept only
+        # so the log and stored history stay readable.
         btc_1h = candles_1h_map.get("BTC-USD")
-        if btc_1h and len(btc_1h) >= 20:
-            b_closes = [float(c[4]) for c in btc_1h if len(c) >= 5]
-            if len(b_closes) >= 20:
-                sma_20 = sum(b_closes[-21:-1]) / 20.0
-                if b_closes[-1] < sma_20 and (btc_day_change or 0.0) < -1.5:
-                    btc_beta_state = "DUMPING"
-                elif b_closes[-1] > sma_20 and (btc_day_change or 0.0) > 1.5:
-                    btc_beta_state = "PUMPING"
+        btc_closes_1h = [float(c[4]) for c in btc_1h if len(c) >= 5] if btc_1h else None
+        beta_thrust = macro_thrust(btc_closes_1h, btc_day_change)
+        logger.info(
+            "Macro beta thrust %+.2f%% (%s); regime %s",
+            beta_thrust, beta_state_from_thrust(beta_thrust), current_regime,
+        )
+
+        # 5c. Cost-tiered triage, pass 2 — who earns the enrichment budget.
+        #
+        #     Order-book, funding, open-interest and dealer-gamma lookups cost far
+        #     more than candles, so they go to the strongest candidates only. The
+        #     old gate was `comp_score >= 50` — the neutral baseline. A symbol had
+        #     to already look average to be allowed the evidence that would show
+        #     whether it was better than average: circular, and it capped the
+        #     scorer at the very symbols it most needed to separate. Rank decides
+        #     now, not a threshold on the thing being measured.
+        pre_rank: list[tuple[float, str]] = []
+        for pid, f in feats_map.items():
+            _pre_dir, pre_score = _pick_direction(f, cfg, current_regime, beta_thrust)
+            pre_rank.append((float(pre_score["rank_key"]), pid))
+        pre_rank.sort(key=lambda t: t[0], reverse=True)
+
+        enrich_set: set[str] = {p for p in watchlist_set if p in feats_map}
+        enrich_set.update(pid for _key, pid in pre_rank[: settings.enrich_top_m])
+        if "BTC-USD" in feats_map:
+            enrich_set.add("BTC-USD")
 
         for pid in product_ids:
             if pid in stale_symbols:
                 snapshot_rows.append({"product_id": pid, "is_stale": 1})
                 continue
 
+            feats = feats_map[pid]
+            # `st` must be rebound here: the snapshot row below serialises it, and
+            # without this it silently carried whatever symbol the previous loop
+            # left behind, writing the SAME raw_stats for all 402 rows.
             st = stats_map[pid]
             c1h = candles_1h_map.get(pid)
             c1d = candles_1d_map.get(pid)
-            c15m = candles_15m_map.get(pid)
-            c6h = candles_6h_map.get(pid)
             pinned = (pid in watchlist_set)
 
-            feats = compute_features(
-                raw_stats=st,
-                raw_ticker=st,
-                raw_candles_1h=c1h,
-                raw_candles_1d=c1d,
-                btc_day_change_pct=btc_day_change,
-                raw_candles_15m=c15m,
-                raw_candles_6h=c6h,
-            )
-            feats["product_id"] = pid
-
-            # Score both directions, then pick the better with a trend constraint
-            long_score = score(feats, cfg.scoring, trade_direction="LONG", regime=current_regime)
-            short_score = score(feats, cfg.scoring, trade_direction="SHORT", regime=current_regime)
-
-            day_chg = float(feats.get("day_change_pct") or 0.0)
-            is_short_allowed = True
-            if day_chg > 3.0 and (short_score["clamped"] - long_score["clamped"]) < 20.0:
-                is_short_allowed = False
-
-            if is_short_allowed and short_score["clamped"] > long_score["clamped"]:
-                trade_direction = "SHORT"
-                score_dict = short_score
-            else:
-                trade_direction = "LONG"
-                score_dict = long_score
-
+            trade_direction, score_dict = _pick_direction(feats, cfg, current_regime, beta_thrust)
             comp_score = score_dict["clamped"]
 
-            # --- L2 validation (WS cache first, REST fallback) ---
-            if comp_score >= 50.0 or pinned:
+            # --- Order-book / futures / options enrichment (triage-selected) ---
+            if pid in enrich_set:
                 try:
                     l2 = ws_memory.get_l2(pid)
                     if not l2 or not l2.get("bids"):
@@ -366,8 +469,17 @@ async def _execute_scan(
                     bids = l2.get("bids", [])
                     asks = l2.get("asks", [])
 
+                    # Both sides of the book, symmetric 2% bands — matching the
+                    # definition already used in features.py. Only the bid side
+                    # was computed here, so `l2_resistance` (the SHORT direction's
+                    # L2 component, weight 0.10) could never be backed and SHORT
+                    # coverage was permanently capped at 0.90 while LONGs could
+                    # reach 1.00.
                     feats["l2_buy_vol_2pct"] = sum(
                         float(b[1]) * float(b[0]) for b in bids if float(b[0]) >= last_p * 0.98
+                    )
+                    feats["l2_sell_vol_2pct"] = sum(
+                        float(a[1]) * float(a[0]) for a in asks if float(a[0]) <= last_p * 1.02
                     )
                     feats["l2_bids"] = bids
                     feats["l2_asks"] = asks
@@ -388,17 +500,20 @@ async def _execute_scan(
                     except Exception as exc:
                         logger.debug("Futures metrics unavailable for %s: %s", pid, exc)
 
-                    score_dict = score(feats, cfg.scoring, trade_direction=trade_direction, regime=current_regime)
+                    # Re-score now that the enrichment is actually in hand.
+                    trade_direction, score_dict = _pick_direction(feats, cfg, current_regime, beta_thrust)
                     comp_score = score_dict["clamped"]
                 except Exception as exc:
                     logger.warning("L2 validation failed for %s: %s", pid, exc)
 
-            primary_label = label(
-                feats, comp_score, cfg.labeling,
-                trade_direction=trade_direction,
-                regime=current_regime,
-                btc_beta_state=btc_beta_state,
-            )
+            if score_dict.get("veto"):
+                primary_label = "SKIP"
+            else:
+                primary_label = label(
+                    feats, comp_score, cfg.labeling,
+                    trade_direction=trade_direction,
+                    regime=current_regime,
+                )
             tags = compute_tags(feats, pinned=pinned)
             score_dict["tags"] = tags
 
@@ -411,14 +526,22 @@ async def _execute_scan(
                 pinned=pinned,
                 trade_direction=trade_direction,
                 regime=current_regime,
+                # Calibrated from realised excursions at the top of this scan.
+                target_r=target_r,
             )
 
-            # Post-ladder validation: ENTRY_ZONE iff price sits within 0.75% of tranche A
+            # Post-ladder refinement: promote to ENTRY_ZONE when price sits within
+            # 0.75% of tranche A — but only if the setup actually clears the score
+            # gate. Proximity alone used to be sufficient, which is how ENTRY_ZONE
+            # became the single worst cohort in the ledger: 8 losses, 0 wins,
+            # average score 31.9 against a configured minimum of 60. Proximity
+            # says "the level is near". It says nothing about whether it is good.
             if ladder_dict and primary_label not in ("SKIP", "CHASE"):
                 t_a = ladder_dict.get("tranche_a_price")
                 current_price = feats.get("last_price")
                 if t_a and current_price:
-                    if abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075:
+                    near_tranche_a = abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075
+                    if near_tranche_a and comp_score >= cfg.labeling.entry_zone_score_min:
                         primary_label = "ENTRY_ZONE"
                     elif primary_label == "ENTRY_ZONE":
                         primary_label = "COILED"
@@ -462,6 +585,10 @@ async def _execute_scan(
                 "swing_shelf_7d": feats["swing_shelf_7d"],
                 "swing_high_7d": feats["swing_high_7d"],
                 "vol_7d_avg_usd": feats["vol_7d_avg_usd"],
+                # Flight recorder: the exact input set this score was computed
+                # from, so the score can be replayed, audited or retrained later.
+                "feature_vector": json.dumps(serialize_feature_vector(feats)),
+                "feature_version": FEATURE_VERSION,
             })
 
             score_rows.append({
@@ -470,6 +597,10 @@ async def _execute_scan(
                 "composite_score": comp_score,
                 "label": primary_label,
                 "score_breakdown": json.dumps(score_dict),
+                "edge": score_dict.get("edge"),
+                "coverage": score_dict.get("coverage"),
+                "rank_key": score_dict.get("rank_key"),
+                "model_version": FEATURE_VERSION,
             })
 
             if ladder_dict:
@@ -484,6 +615,10 @@ async def _execute_scan(
                     "tranche_a_size_pct": ladder_dict["tranche_a_size_pct"],
                     "tranche_b_size_pct": ladder_dict["tranche_b_size_pct"],
                     "basis": json.dumps(ladder_dict["basis"]),
+                    # Persist the calibrated T1 multiple. The read paths rebuild the
+                    # ladder dict from this row before calling sanitize, which
+                    # restores a 2.0R default if the field is missing.
+                    "target_r": ladder_dict.get("target_r"),
                 })
 
             candidates_out.append({
@@ -493,6 +628,9 @@ async def _execute_scan(
                 "pos_in_range": feats["pos_in_range"],
                 "quote_vol_24h": feats["quote_vol_24h"],
                 "composite_score": comp_score,
+                "edge": score_dict.get("edge"),
+                "coverage": score_dict.get("coverage"),
+                "coverage_band": score_dict.get("coverage_band"),
                 "trade_direction": trade_direction,
                 "label": primary_label,
                 "tags": tags,
