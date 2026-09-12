@@ -70,7 +70,6 @@ def label(
     config: LabelingConfig | None = None,
     trade_direction: str = "LONG",
     regime: str = "TRENDING_UP",
-    btc_beta_state: str = "RANGING",
 ) -> Label:
     quote_vol = float(features.get("quote_vol_24h") or 0.0)
     day_change = float(features.get("day_change_pct") or 0.0)
@@ -89,23 +88,30 @@ def label(
     early_pos_max = config.early_pos_max if config else 0.75
     
     # Dynamic entry score based on regime
-    entry_score_min = config.entry_zone_score_min if config else 60.0
+    eff_min_score = config.min_composite_score if config else 60.0
     if regime == "VOLATILE":
-        entry_score_min += 10.0  # Require higher score (70.0) in volatile regimes
+        eff_min_score += 10.0  # Require higher score (70.0) in volatile regimes
     elif regime == "TRENDING_UP" and trade_direction == "LONG":
-        entry_score_min -= 5.0   # Relax slightly if trend aligned
+        eff_min_score -= 5.0   # Relax slightly if trend aligned
     elif regime == "TRENDING_DOWN" and trade_direction == "SHORT":
-        entry_score_min -= 5.0
+        eff_min_score -= 5.0
 
-    # Macro Beta Protection Logic (Avoid longing dumps, shorting pumps)
-    if trade_direction == "LONG" and btc_beta_state == "DUMPING":
-        return "SKIP"
-    if trade_direction == "SHORT" and btc_beta_state == "PUMPING":
-        return "SKIP"
+    # NOTE: the macro beta gate that used to live here — returning SKIP for every
+    # LONG while BTC dumped, and every SHORT while it pumped — has moved into the
+    # scorer as a graded penalty (`macro_beta_penalty`). A blanket veto on a
+    # market-wide flag discarded whole cohorts that the symbol's own evidence had
+    # ranked highly; see scorer.score() block 8. The entry-score gate below still
+    # applies, so a weak setup cannot enter on a hostile tape regardless.
 
     # 1. SKIP
     if quote_vol < min_quote_vol:
         return "SKIP"
+
+    # Fix 1: Hard score gate. If the score is below the (regime-adjusted) 
+    # min_composite_score threshold, blindly downgrade to WATCH.
+    # This prevents loose COILED/EARLY entries from bypassing quality filtering.
+    if composite_score < eff_min_score:
+        return "WATCH"
 
     if trade_direction == "SHORT":
         # 2. CHASE (Shorting a dump)
@@ -120,7 +126,7 @@ def label(
         upper_fib = max(fib_236, fib_382)
         in_fib_zone = (lower_fib > 0 and lower_fib <= last_price <= upper_fib)
         
-        if (in_vwap_pocket or in_fib_zone) and composite_score >= entry_score_min:
+        if (in_vwap_pocket or in_fib_zone):
             return "ENTRY_ZONE"
             
         # 4. COILED (Short Rally)
@@ -145,7 +151,7 @@ def label(
         upper_fib = max(fib_500, fib_618)
         in_fib_zone = (lower_fib > 0 and lower_fib <= last_price <= upper_fib)
 
-        if (in_vwap_pocket or in_fib_zone) and composite_score >= entry_score_min:
+        if (in_vwap_pocket or in_fib_zone):
             return "ENTRY_ZONE"
 
         # 4. COILED

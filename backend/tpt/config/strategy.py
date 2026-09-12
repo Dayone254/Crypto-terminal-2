@@ -27,9 +27,32 @@ class InteractionBonuses(BaseModel):
     breakout_bonus: float = 8.0
 
 
+# Default component weights. These must mirror config/strategy.yaml: a
+# `ScoringConfig()` built without the YAML (as the unit tests and any caller that
+# omits a config do) previously fell back to an *empty* weight map, which silently
+# degraded the scorer to baseline-plus-interactions and reported zero coverage.
+_DEFAULT_LONG_WEIGHTS: dict[str, float] = {
+    "liquidity": 0.10,
+    "trend_strength": 0.25,
+    "volatility_compression": 0.10,
+    "momentum": 0.25,
+    "relative_strength": 0.20,
+    "l2_support": 0.10,
+}
+
+_DEFAULT_SHORT_WEIGHTS: dict[str, float] = {
+    "liquidity": 0.10,
+    "trend_weakness": 0.25,
+    "volatility_expansion": 0.10,
+    "momentum": 0.25,
+    "relative_weakness": 0.20,
+    "l2_resistance": 0.10,
+}
+
+
 class ComponentWeights(BaseModel):
-    LONG: dict[str, float] = Field(default_factory=dict)
-    SHORT: dict[str, float] = Field(default_factory=dict)
+    LONG: dict[str, float] = Field(default_factory=lambda: dict(_DEFAULT_LONG_WEIGHTS))
+    SHORT: dict[str, float] = Field(default_factory=lambda: dict(_DEFAULT_SHORT_WEIGHTS))
 
 
 class ScoringConfig(BaseModel):
@@ -37,6 +60,12 @@ class ScoringConfig(BaseModel):
     component_weights: ComponentWeights = Field(default_factory=ComponentWeights)
     interaction_bonuses: InteractionBonuses = Field(default_factory=InteractionBonuses)
     counter_trend_penalty: float = 15.0
+    # Graded replacement for the old hard SKIP on a hostile BTC push. Points
+    # removed at full headwind, and the thrust (percent) at which it saturates.
+    # A penalty rather than a veto, so an exceptional setup can still qualify:
+    # a broad BTC dump is exactly when the strongest relative performers matter.
+    macro_beta_penalty: float = 18.0
+    macro_beta_full_at_pct: float = 3.0
 
 
 class LabelingConfig(BaseModel):
@@ -49,7 +78,8 @@ class LabelingConfig(BaseModel):
     coiled_pos_high: float = 0.65
     early_change_min: float = 2
     early_pos_max: float = 0.75
-    entry_zone_score_min: float = 60
+    # Fix 1: Hard gate (based on COILED WR 12.9% / ENTRY_ZONE 0%)
+    min_composite_score: float = 60
 
 
 class LadderConfig(BaseModel):
@@ -60,6 +90,23 @@ class LadderConfig(BaseModel):
     fib_a_high: float = 0.618
     fib_b_level: float = 0.786
     target2_extension_pct: float = 5
+
+    # ── Risk sizing ──────────────────────────────────────────────────────────
+    # The stop is bounded using the instrument's own 1h ATR, so an R means
+    # roughly the same thing across assets of wildly differing volatility. The
+    # old logic used a flat 3% stop with a 5% clamp, which on an asset whose
+    # whole favourable excursion is 1-3% left R so wide that every R-multiple
+    # target was unreachable.
+    atr_stop_mult: float = 1.5   # risk = this many 1h ATRs, before bounding
+    min_stop_pct: float = 1.0    # percent of entry: never stop inside the noise
+    max_stop_pct: float = 3.0    # percent of entry: never so wide R dwarfs the move
+
+    # ── Exit management ──────────────────────────────────────────────────────
+    # Break-even arming, in R: the stop moves to entry once the trade has earned
+    # this much of its own risk back. This replaces a flat `mfe >= 2.5` PERCENT,
+    # which on a 5% stop armed at 0.5R and converted eight of the first 22 closed
+    # trades into break-evens.
+    be_arm_r: float = 1.0
 
 
 class AlertConfig(BaseModel):
