@@ -26,9 +26,28 @@ from datetime import UTC, datetime
 
 import httpx
 
+from tpt.config.strategy import load_strategy
 from tpt.data.database import get_connection
 
 logger = logging.getLogger(__name__)
+
+
+def break_even_arm_pct(risk_pct: float, be_arm_r: float, fallback_pct: float = 2.5) -> float:
+    """The favourable excursion, in percent, at which the stop moves to entry.
+
+    Expressed in R so it scales with the trade's own risk. The previous rule was a
+    flat ``mfe >= 2.5`` PERCENT regardless of risk, which on a 5% stop armed at
+    0.5R — earlier than the trade's own geometry can survive. All eight
+    break-evens in the first 22 closed trades had MFE just over 2.5% and MAE
+    under 1.24%: price nudged past the trigger, the stop jumped to entry, and the
+    trade drifted back out flat.
+
+    ``fallback_pct`` covers the degenerate case of a signal with no usable risk
+    distance, where there is no R to scale by.
+    """
+    if risk_pct <= 0:
+        return fallback_pct
+    return be_arm_r * risk_pct
 
 _COINBASE_URL = "https://api.exchange.coinbase.com/products/{symbol}/candles"
 
@@ -141,7 +160,15 @@ async def process_signals():
 
     if not signals:
         return
-        
+
+    # Read once per pass rather than per signal: strategy.yaml is hot-reloaded, and
+    # the exit geometry should follow the same config the ladder used to place the
+    # trade. Falls back to the default rather than failing the whole pass.
+    try:
+        be_arm_r = load_strategy().ladder.be_arm_r
+    except Exception:
+        be_arm_r = 1.0
+
     updates = []
 
     async with httpx.AsyncClient() as client:
@@ -149,6 +176,21 @@ async def process_signals():
             sig = dict(sig)
             try:
                 sig_time = sig["timestamp"]
+                
+                # Fix 4: Order expiry filter
+                try:
+                    expiry_hrs = load_strategy().ladder.order_expiry_hours
+                except Exception:
+                    expiry_hrs = 6
+                
+                now_ts = int(datetime.now(UTC).timestamp())
+                if not sig.get("filled_at") and (now_ts - sig_time > (expiry_hrs * 3600)):
+                    updates.append((
+                        "EXPIRED", float(sig["mfe"] or 0.0), float(sig["mae"] or 0.0), 
+                        now_ts, None, None, None, None, "EXPIRED", sig.get("trail_sl"), sig["id"]
+                    ))
+                    continue
+
                 # Use fill time as fetch start if already filled, else signal time
                 fetch_from = sig.get("filled_at") or sig_time
                 candles = await _fetch_candles(client, sig["symbol"], fetch_from)
@@ -234,7 +276,11 @@ async def process_signals():
                         mae = min(mae, mae_cand)
 
                         # ── BREAK-EVEN TRAILING STOP (Pre-T1) ──
-                        is_be_active = mfe >= 2.5
+                        # Armed when the trade has earned its own risk back, in R —
+                        # see break_even_arm_pct for why this is not a flat percent.
+                        risk_pct = (risk_delta / entry_p * 100.0) if entry_p > 0 else 0.0
+                        be_arm_pct = break_even_arm_pct(risk_pct, be_arm_r)
+                        is_be_active = mfe >= be_arm_pct
                         if is_be_active and not partial_exit_at:
                             if direction == "LONG":
                                 eff_sl = max(eff_sl, fill_price)

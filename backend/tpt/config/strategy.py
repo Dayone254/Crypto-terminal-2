@@ -100,6 +100,9 @@ class LadderConfig(BaseModel):
     min_stop_pct: float = 1.0    # percent of entry: never stop inside the noise
     # Fix 3: Loosen the ATR stop clamp based on Avg MAE of -4.39% 
     max_stop_pct: float = 6.0    # percent of entry: never so wide R dwarfs the move
+    # Fix 4: Order expiry for stale pending signals
+    order_expiry_hours: int = 6
+
 
     # ── Exit management ──────────────────────────────────────────────────────
     # Break-even arming, in R: the stop moves to entry once the trade has earned

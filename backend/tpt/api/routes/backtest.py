@@ -8,9 +8,80 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from tpt.data.database import get_connection
+from tpt.engine.exits import calibrate_targets, excursion_from_signal
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_CLOSED = "('WIN', 'LOSS', 'BREAK_EVEN', 'PARTIAL_WIN')"
+
+
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+
+
+def _excursion_summary(closed_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """How far trades actually ran, in R — and how many reached their own target.
+
+    A bare win rate cannot distinguish "the entries are wrong" from "the target is
+    unreachable". These numbers can. When the win rate sat at 0%, this is the
+    evidence that showed the target demanded 2.0R while nothing had ever exceeded
+    0.72R — a fact about the target, not about the market.
+    """
+    excursions = [e for e in (excursion_from_signal(r) for r in closed_rows) if e is not None]
+    if not excursions:
+        return {
+            "n": 0,
+            "avg_mfe_r": None,
+            "median_mfe_r": None,
+            "best_mfe_r": None,
+            "avg_mae_r": None,
+            "avg_target_r": None,
+            "tp1_hits": 0,
+            "tp1_hit_rate": 0.0,
+        }
+
+    mfe_rs = sorted(e.mfe_r for e in excursions)
+
+    # Did the trade ever reach the target that was published for it? Note this is
+    # the target the trade *carried*, which may differ from the one the estimator
+    # now proposes — conflating the two produced a sentence claiming 0.72R fell
+    # short of 0.25R.
+    hits = 0
+    target_rs: list[float] = []
+    for row in closed_rows:
+        exc = excursion_from_signal(row)
+        if exc is None:
+            continue
+        try:
+            entry = float(row.get("entry_price"))
+            stop = float(row.get("sl_price"))
+            target = float(row.get("tp_price"))
+        except (TypeError, ValueError):
+            continue
+        risk = abs(entry - stop)
+        if risk <= 0:
+            continue
+        required_r = abs(target - entry) / risk
+        target_rs.append(required_r)
+        if exc.mfe_r >= required_r:
+            hits += 1
+
+    return {
+        "n": len(excursions),
+        "avg_mfe_r": round(sum(mfe_rs) / len(mfe_rs), 2),
+        "median_mfe_r": round(_median(mfe_rs) or 0.0, 2),
+        "best_mfe_r": round(max(mfe_rs), 2),
+        "avg_mae_r": round(sum(e.mae_r for e in excursions) / len(excursions), 2),
+        # The distance those trades' own targets demanded, so the UI can compare
+        # like with like.
+        "avg_target_r": round(sum(target_rs) / len(target_rs), 2) if target_rs else None,
+        "tp1_hits": hits,
+        "tp1_hit_rate": round(hits / len(excursions) * 100.0, 1),
+    }
 
 
 @router.get("/stats")
@@ -21,7 +92,7 @@ async def backtest_stats():
             async with conn.execute("SELECT status, COUNT(*) as cnt FROM signals GROUP BY status") as cursor:
                 rows = await cursor.fetchall()
 
-            counts = {"PENDING": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0, "ACTIVE_T2": 0, "PARTIAL_WIN": 0}
+            counts = {"PENDING": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0, "ACTIVE_T2": 0, "PARTIAL_WIN": 0, "EXPIRED": 0}
             for r in rows:
                 counts[r["status"]] = r["cnt"]
 
@@ -30,11 +101,17 @@ async def backtest_stats():
             # Win rate counts profitable WIN vs LOSS. BREAK_EVEN and PARTIAL_WIN are excluded from directional edge.
             win_rate = (counts["WIN"] / directional_outcomes * 100) if directional_outcomes > 0 else 0.0
 
-            async with conn.execute("SELECT * FROM signals WHERE status IN ('WIN', 'LOSS', 'BREAK_EVEN', 'PARTIAL_WIN') ORDER BY id DESC LIMIT 50") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} ORDER BY id DESC LIMIT 50") as cursor:
                 recent_trades = [dict(r) for r in await cursor.fetchall()]
 
             async with conn.execute("SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2') ORDER BY id DESC") as cursor:
                 pending_trades = [dict(r) for r in await cursor.fetchall()]
+
+            # All closed rows (not just the recent 50) feed the excursion summary
+            # and the target estimate: the calibration is a property of the whole
+            # ledger, and truncating it would bias the estimator.
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED}") as cursor:
+                closed_rows = [dict(r) for r in await cursor.fetchall()]
 
             return {
                 "win_rate": round(win_rate, 2),
@@ -44,6 +121,9 @@ async def backtest_stats():
                 "break_even": counts["BREAK_EVEN"],
                 "partial_wins": counts["PARTIAL_WIN"],
                 "pending_count": counts["PENDING"] + counts["ACTIVE_T2"],
+                "expired_count": counts.get("EXPIRED", 0),
+                "excursion": _excursion_summary(closed_rows),
+                "target_estimate": calibrate_targets(closed_rows).as_dict(),
                 "recent": recent_trades,
                 "active": pending_trades,
             }
