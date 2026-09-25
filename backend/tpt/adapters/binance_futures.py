@@ -87,7 +87,10 @@ async def get_futures_klines(symbol: str, interval: str = "1h", limit: int = 300
     """
     client = get_client()
     try:
-        formatted_sym = symbol.upper().replace("-USD", "USDT").replace("-", "")
+        formatted_sym = symbol.upper().replace("-USD", "").replace("-", "")
+        if not formatted_sym.endswith("USDT") and not formatted_sym.endswith("BUSD"):
+            formatted_sym = f"{formatted_sym}USDT"
+
         params: dict[str, Any] = {
             "symbol": formatted_sym,
             "interval": interval,

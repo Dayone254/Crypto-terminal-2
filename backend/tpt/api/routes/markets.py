@@ -356,14 +356,34 @@ async def get_market_candles(
 
     if not before_ts:
         try:
-            # 1s timeout: if Binance Futures doesn't respond fast, fall back immediately
-            # rather than blocking the chart render for 3 seconds (common for smaller alts).
             live_klines = await asyncio.wait_for(
                 get_futures_klines(sym, interval=interval, limit=min(limit, 1000)),
-                timeout=1.0
+                timeout=3.0
             )
             if live_klines and len(live_klines) > 0:
                 return live_klines
+        except Exception:
+            pass
+
+        # Coinbase REST fallback
+        try:
+            cb_adapter = CoinbaseAdapter()
+            cb_candles = await cb_adapter.get_candles(
+                product_id=sym if "-" in sym else f"{sym}-USD",
+                granularity=granularity,
+                limit=min(limit, 300)
+            )
+            if cb_candles:
+                formatted_cb = []
+                for c in reversed(cb_candles):  # Coinbase returns newest first
+                    t_sec = int(c[0])
+                    low_p = float(c[1])
+                    high_p = float(c[2])
+                    open_p = float(c[3])
+                    close_p = float(c[4])
+                    vol = float(c[5])
+                    formatted_cb.append([t_sec, open_p, high_p, low_p, close_p, vol])
+                return formatted_cb
         except Exception:
             pass
 
