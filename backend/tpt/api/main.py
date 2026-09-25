@@ -134,8 +134,7 @@ def create_app() -> FastAPI:
     # Explicit allow-list. The previous `allow_origins=["*"]` combined with
     # allow_credentials is an invalid/dangerous combination that lets any page
     # the user visits call this API.
-    allowed_origins = sorted({
-        settings.frontend_url,
+    allowed_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
@@ -144,35 +143,25 @@ def create_app() -> FastAPI:
         "http://127.0.0.1:3002",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-    })
+    ]
+    if settings.frontend_url and settings.frontend_url != "*":
+        allowed_origins.append(settings.frontend_url)
+
     if settings.api_token:
         @application.middleware("http")
         async def enforce_api_token(request: Request, call_next):
             if (
-                request.url.path.startswith("/api/")
+                request.method != "OPTIONS"
+                and request.url.path.startswith("/api/")
                 and request.headers.get("x-api-token") != settings.api_token
             ):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
-    # CORSMiddleware must be added LAST so it becomes the OUTERMOST middleware,
-    # ensuring CORS headers (Access-Control-Allow-Origin) are attached to ALL responses,
-    # including 500 Internal Server Errors, 504 Gateway Timeouts, and 401s.
-    allowed_origins = sorted({
-        settings.frontend_url,
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:3002",
-        "http://127.0.0.1:3002",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    })
     application.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_origin_regex=r"https://.*\.vercel\.app|https://.*\.onrender\.com|http://(localhost|127\.0\.0\.1)(:\d+)?",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
