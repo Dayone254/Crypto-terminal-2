@@ -30,9 +30,23 @@ async def candle_tick_stream(websocket: WebSocket, product_id: str):
     logger.info("Tick stream opened for %s", product_id)
 
     async def feed():
-        async for tick in stream_ticker(product_id):
+        try:
+            async for tick in stream_ticker(product_id):
+                try:
+                    await websocket.send_json(tick)
+                except (WebSocketDisconnect, Exception):
+                    return
+        except Exception as err:
+            logger.warning("Primary ticker stream ended for %s: %s", product_id, err)
+
+        # Fallback loop: if primary stream ends/fails, emit synthetic tick ping every 3s
+        # from last spot price so NativeChart WS remains alive without throwing browser errors
+        from tpt.adapters.binance_futures import get_premium_index
+        sym_clean = product_id.upper().replace("-USD", "USDT").replace("-", "")
+        while True:
             try:
-                await websocket.send_json(tick)
+                await asyncio.sleep(3.0)
+                await websocket.send_json({"type": "ping_tick", "symbol": product_id, "time": int(asyncio.get_event_loop().time())})
             except (WebSocketDisconnect, Exception):
                 return
 
@@ -46,3 +60,4 @@ async def candle_tick_stream(websocket: WebSocket, product_id: str):
         logger.info("Tick stream closed for %s", product_id)
     finally:
         feed_task.cancel()
+

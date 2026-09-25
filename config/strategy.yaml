@@ -27,6 +27,12 @@ scoring:
     confluence_bonus: 12.0
     breakout_bonus: 10.0
   counter_trend_penalty: 15.0
+  # Graded macro-beta headwind (replaces the old hard SKIP on a hostile BTC push).
+  # Points removed at full headwind, and the BTC thrust in percent at which the
+  # penalty saturates. Raise macro_beta_penalty to be stricter, lower it to let
+  # strong relative performers through a broad dump.
+  macro_beta_penalty: 18.0
+  macro_beta_full_at_pct: 3.0
 
 labeling:
   min_quote_volume: 1_000_000
@@ -48,6 +54,17 @@ ladder:
   fib_a_high: 0.618
   fib_b_level: 0.786
   target2_extension_pct: 5
+  # ── Risk sizing ──────────────────────────────────────────────────────────
+  # The stop is bounded by the instrument's own 1h ATR, so R means roughly the
+  # same thing across assets of differing volatility. Replaces a flat 3% stop
+  # with a 5% clamp — on an asset whose whole favourable excursion is 1-3%, a 5%
+  # stop made R so wide that every R-multiple target was unreachable.
+  atr_stop_mult: 1.5    # risk = this many 1h ATRs, before bounding
+  min_stop_pct: 1.0     # percent of entry: never stop inside the noise
+  max_stop_pct: 3.0     # percent of entry: never so wide R dwarfs the move
+  # Break-even arming, in R — not a flat 2.5%. At 1.0 the stop moves to entry
+  # once the trade has earned its own risk back. Raise to let winners breathe.
+  be_arm_r: 1.0
 
 alerts:
   dedupe_hours: 6

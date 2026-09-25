@@ -154,7 +154,7 @@ async def _resolve_same_candle_collision(
 async def process_signals():
     """Evaluate all PENDING signals against real price action."""
     async with get_connection() as conn, conn.execute(
-        "SELECT * FROM signals WHERE status='PENDING'"
+        "SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2')"
     ) as cur:
         signals = await cur.fetchall()
 
@@ -169,10 +169,11 @@ async def process_signals():
     except Exception:
         be_arm_r = 1.0
 
-    updates = []
+    updates: list[tuple] = []
 
     async with httpx.AsyncClient() as client:
         for sig in signals:
+            await asyncio.sleep(0.01)  # Yield to asyncio event loop so HTTP API endpoints respond instantly
             sig = dict(sig)
             try:
                 sig_time = sig["timestamp"]
@@ -401,6 +402,7 @@ async def process_signals():
 async def evaluator_loop():
     """Background daemon — runs process_signals every 2 minutes."""
     logger.info("Backtest Evaluator Engine started.")
+    await asyncio.sleep(2.0)
     while True:
         try:
             await process_signals()

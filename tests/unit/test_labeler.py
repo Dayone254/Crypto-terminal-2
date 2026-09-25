@@ -61,3 +61,26 @@ def test_compute_tags() -> None:
     assert "FIB50_TOUCH" in tags
     assert "OVERBOUGHT_1H" in tags
     assert "PINNED" in tags
+
+
+def test_a_high_conviction_long_is_not_vetoed_by_the_macro_state() -> None:
+    """Regression: a whole-cohort veto used to live in this function.
+
+    The labeler returned SKIP for every LONG while BTC was below its short SMA
+    and down on the day, regardless of the symbol's own evidence. On a live scan
+    that skipped 72 of 72 longs — eleven of them scoring >=60, averaging 79.9,
+    including a symbol up 73% against BTC over seven days. The macro hostility is
+    now priced in the scorer; labelling must reflect the symbol, not the tape.
+    """
+    feats = {
+        "quote_vol_24h": 10_000_000.0,
+        "day_change_pct": 3.0,
+        "pos_in_range": 0.50,
+        "last_price": 100.0,
+        "vwap_24h": 100.0,
+        "fib_500": 100.0,
+        "fib_618": 95.0,
+    }
+    assert label(feats, composite_score=75.0, trade_direction="LONG") == "ENTRY_ZONE"
+    # And the low-volume floor still applies, macro state or not.
+    assert label({**feats, "quote_vol_24h": 500_000.0}, composite_score=75.0) == "SKIP"

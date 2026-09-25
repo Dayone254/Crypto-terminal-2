@@ -12,6 +12,47 @@ from tpt.engine.features import FeatureDict
 Regime = Literal["TRENDING_UP", "TRENDING_DOWN", "RANGING", "VOLATILE"]
 
 
+def macro_thrust(
+    btc_closes_1h: list[float] | None = None,
+    btc_day_change_pct: float | None = None,
+    period: int = 20,
+) -> float:
+    """Signed strength of BTC's push, in percent. Positive = up, negative = down.
+
+    Two components, averaged so neither dominates:
+      * how far BTC sits from its short SMA, as a percent of that SMA
+      * BTC's change over the last 24h
+
+    Deliberately continuous. The classified regimes below are the right shape for
+    coarse decisions, but a *penalty* needs a magnitude: the old three-state
+    beta flag could only say "hostile" or "not", and the labeler turned that into
+    an absolute veto. A number can be priced.
+
+    Either argument may be omitted; whatever is supplied is averaged, and no
+    input at all yields 0.0 (no information, no thrust — never a phantom signal).
+    """
+    parts: list[float] = []
+    if btc_closes_1h and len(btc_closes_1h) >= period + 1:
+        window = btc_closes_1h[-(period + 1):-1]
+        sma = sum(window) / len(window)
+        if sma > 0:
+            parts.append((btc_closes_1h[-1] - sma) / sma * 100.0)
+    if btc_day_change_pct is not None:
+        parts.append(float(btc_day_change_pct))
+    if not parts:
+        return 0.0
+    return round(sum(parts) / len(parts), 4)
+
+
+def beta_state_from_thrust(thrust: float, threshold: float = 1.5) -> str:
+    """Discrete label for the macro push, for display and for stored history."""
+    if thrust <= -threshold:
+        return "DUMPING"
+    if thrust >= threshold:
+        return "PUMPING"
+    return "RANGING"
+
+
 def detect_regime(btc_features: FeatureDict) -> Regime:
     """Classify the current market regime based on BTC features.
     

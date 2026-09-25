@@ -18,86 +18,86 @@ export function LimitLadderOverlay({ ladder, lastPrice }: LimitLadderOverlayProp
         ? (((lastPrice - ladder.tranche_a_price) / ladder.tranche_a_price) * 100).toFixed(1)
         : null;
 
+    // These were hardcoded ("Tranche A (60%)", "Risk Invalidation (-3.0%)", "-5.0%
+    // Extension Drop") while the ladder sizes and stop distance are dynamic — so the
+    // panel contradicted the header, which showed 70/30 and the 5% risk clamp.
+    const aPct = Math.round(ladder.tranche_a_size_pct ?? 60);
+    const bPct = Math.round(ladder.tranche_b_size_pct ?? 40);
+    const isShort = ladder.trade_direction === "SHORT";
+    const pctMove = (from: number | null | undefined, to: number | null | undefined) =>
+        from && to ? Math.abs(((to - from) / from) * 100) : null;
+    const stopPct = pctMove(ladder.tranche_a_price, ladder.stop_price);
+    const t2Pct = pctMove(ladder.tranche_a_price, ladder.target_2_price);
+
     return (
-        <div style={{ background: "#0b0f19", border: "none", borderRadius: 0, padding: "1rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "0.75rem", fontWeight: 700, borderBottom: "none", paddingBottom: "0.5rem", color: "var(--text-dim)" }}>
-                <span>LIMIT LADDER SETUP LEVELS</span>
-                <span>LAST: <strong className="mono" style={{ color: "#FFF" }}>{fmt(lastPrice)}</strong></span>
+        <div style={{ display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--line-heavy)", paddingBottom: "0.25rem", marginBottom: "0.25rem", fontSize: "0.65rem", color: "var(--text-4)", fontWeight: 700 }}>
+                <span>LIMIT LADDER</span>
+                <span>LAST: {fmt(lastPrice)}</span>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-                {/* Entry Tranches */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                    <div style={{ background: "rgba(16, 185, 129, 0.1)", border: "none", padding: "0.6rem 0.8rem", borderRadius: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                            <div style={{ fontWeight: 800, fontSize: "0.75rem", color: "#34D399" }}>Tranche A (60%)</div>
-                            <div style={{ fontSize: "0.65rem", color: "rgba(52, 211, 153, 0.7)" }}>
-                                {ladder.trade_direction === "SHORT" ? "Primary Sell Zone" : "Primary Buy Zone"}
-                            </div>
-                        </div>
-                        <div className="mono" style={{ textAlign: "right", fontWeight: 800, color: "#FFF", fontSize: "0.95rem" }}>
-                            {fmt(ladder.tranche_a_price)}
-                            {distToA && (
-                                <div style={{ fontSize: "0.65rem", color: "#34D399" }}>
-                                    {Number(distToA) > 0 ? `+${distToA}% above` : `${distToA}% tagged`}
-                                </div>
-                            )}
-                        </div>
+            <div style={{ display: "flex", flexDirection: "column", fontSize: "0.7rem" }}>
+                {/* TRANCHE A */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0.15rem 0.25rem", background: "rgba(255,255,255,0.015)", borderBottom: "1px solid var(--line)" }}>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "baseline" }}>
+                        <span style={{ color: "var(--text-3)", fontWeight: 500 }}>TRANCHE A ({aPct}%)</span>
+                        <span style={{ fontSize: "0.55rem", color: "var(--text-5)" }}>{ladder.trade_direction === "SHORT" ? "SELL ZONE" : "BUY ZONE"}</span>
                     </div>
-
-                    <div style={{ background: "rgba(6, 182, 212, 0.1)", border: "none", padding: "0.6rem 0.8rem", borderRadius: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                            <div style={{ fontWeight: 800, fontSize: "0.75rem", color: "#38BDF8" }}>Tranche B (40%)</div>
-                            <div style={{ fontSize: "0.65rem", color: "rgba(56, 189, 248, 0.7)" }}>
-                                {ladder.trade_direction === "SHORT" ? "Deep Resistance Fill" : "Deep Pocket Fill"}
-                            </div>
-                        </div>
-                        <div className="mono" style={{ textAlign: "right", fontWeight: 800, color: "#FFF", fontSize: "0.95rem" }}>
-                            {fmt(ladder.tranche_b_price)}
-                        </div>
-                    </div>
-
-                    <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "none", padding: "0.6rem 0.8rem", borderRadius: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                            <div style={{ fontWeight: 800, fontSize: "0.75rem", color: "#F87171" }}>Hard Stop Loss</div>
-                            <div style={{ fontSize: "0.65rem", color: "rgba(248, 113, 113, 0.7)" }}>Risk Invalidation (-3.0%)</div>
-                        </div>
-                        <div className="mono" style={{ textAlign: "right", fontWeight: 800, color: "#FFF", fontSize: "0.95rem" }}>
-                            {fmt(ladder.stop_price)}
-                        </div>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--text-main)", fontWeight: 700, fontSize: "0.75rem" }}>{fmt(ladder.tranche_a_price)}</span>
+                        {distToA && (
+                            <span style={{ fontSize: "0.6rem", color: "var(--text-4)", marginLeft: "0.5rem" }}>({Number(distToA) > 0 ? `+${distToA}%` : `${distToA}%`})</span>
+                        )}
                     </div>
                 </div>
 
-                {/* Profit Targets */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                    <div style={{ background: "rgba(59, 130, 246, 0.1)", border: "none", padding: "0.6rem 0.8rem", borderRadius: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                            <div style={{ fontWeight: 800, fontSize: "0.75rem", color: "#60A5FA" }}>Target 1 (TP1)</div>
-                            <div style={{ fontSize: "0.65rem", color: "rgba(96, 165, 250, 0.7)" }}>
-                                {ladder.trade_direction === "SHORT" ? "Day Low Target" : "Day High Resistance"}
-                            </div>
-                        </div>
-                        <div className="mono" style={{ textAlign: "right", fontWeight: 800, color: "#FFF", fontSize: "0.95rem" }}>
-                            {fmt(ladder.target_1_price)}
-                        </div>
+                {/* TRANCHE B */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0.15rem 0.25rem", borderBottom: "1px solid var(--line)" }}>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "baseline" }}>
+                        <span style={{ color: "var(--text-3)", fontWeight: 500 }}>TRANCHE B ({bPct}%)</span>
+                        <span style={{ fontSize: "0.55rem", color: "var(--text-5)" }}>DEEP FILL</span>
                     </div>
+                    <span className="mono" style={{ color: "var(--text-main)", fontWeight: 700, fontSize: "0.75rem" }}>{fmt(ladder.tranche_b_price)}</span>
+                </div>
 
-                    <div style={{ background: "rgba(139, 92, 246, 0.1)", border: "none", padding: "0.6rem 0.8rem", borderRadius: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                            <div style={{ fontWeight: 800, fontSize: "0.75rem", color: "#C084FC" }}>Target 2 (TP2)</div>
-                            <div style={{ fontSize: "0.65rem", color: "rgba(192, 132, 252, 0.7)" }}>
-                                {ladder.trade_direction === "SHORT" ? "-5.0% Extension Drop" : "+5.0% Extension"}
-                            </div>
-                        </div>
-                        <div className="mono" style={{ textAlign: "right", fontWeight: 800, color: "#FFF", fontSize: "0.95rem" }}>
-                            {fmt(ladder.target_2_price)}
-                        </div>
+                {/* HARD STOP */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0.15rem 0.25rem", background: "rgba(255,255,255,0.015)", borderBottom: "1px solid var(--line-heavy)" }}>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "baseline" }}>
+                        <span style={{ color: "var(--text-3)", fontWeight: 500 }}>HARD STOP</span>
                     </div>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--neg-bright)", fontWeight: 700, fontSize: "0.75rem" }}>{fmt(ladder.stop_price)}</span>
+                        {stopPct !== null && (
+                            <span style={{ fontSize: "0.6rem", color: "var(--neg)", marginLeft: "0.5rem" }}>(-{stopPct.toFixed(1)}%)</span>
+                        )}
+                    </div>
+                </div>
 
-                    <div style={{ background: "rgba(255,255,255,0.03)", border: "none", padding: "0.6rem 0.8rem", borderRadius: 0, display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                        <span>R/R Profile:</span>
-                        <span className="mono font-bold" style={{ color: "#34D399", fontWeight: 700 }}>Actionable Entry</span>
+                {/* TARGET 1 */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0.15rem 0.25rem", borderBottom: "1px solid var(--line)" }}>
+                    <span style={{ color: "var(--text-3)", fontWeight: 500 }}>TARGET 1</span>
+                    <span className="mono" style={{ color: "var(--accent-blue-bright)", fontWeight: 700, fontSize: "0.75rem" }}>{fmt(ladder.target_1_price)}</span>
+                </div>
+
+                {/* TARGET 2 */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0.15rem 0.25rem", background: "rgba(255,255,255,0.015)", borderBottom: "1px solid var(--line)" }}>
+                    <span style={{ color: "var(--text-3)", fontWeight: 500 }}>TARGET 2</span>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--accent-purple-bright)", fontWeight: 700, fontSize: "0.75rem" }}>{fmt(ladder.target_2_price)}</span>
+                        {t2Pct !== null && (
+                            <span style={{ fontSize: "0.6rem", color: "var(--accent-purple)", marginLeft: "0.5rem" }}>({isShort ? "-" : "+"}{t2Pct.toFixed(1)}%)</span>
+                        )}
                     </div>
+                </div>
+
+                {/* R/R */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0.15rem 0.25rem" }}>
+                    <span style={{ color: "var(--text-4)", fontWeight: 500 }}>R/R RATIO</span>
+                    <span className="mono" style={{ color: "var(--text-main)", fontWeight: 700, fontSize: "0.7rem" }}>
+                        {ladder.rr_a_t1 !== undefined && ladder.rr_a_t2 !== undefined
+                            ? `${ladder.rr_a_t1.toFixed(2)} → ${ladder.rr_a_t2.toFixed(2)}`
+                            : "—"}
+                    </span>
                 </div>
             </div>
         </div>

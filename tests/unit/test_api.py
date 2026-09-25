@@ -36,3 +36,10 @@ async def test_watchlist_rest_endpoints() -> None:
         resp_unpin = await client.delete("/api/v1/watchlist/HYPE-USD")
         assert resp_unpin.status_code == 200
         assert resp_unpin.json()["on_watchlist"] is False
+
+
+@pytest.mark.asyncio
+async def test_options_websocket_route_registration() -> None:
+    routes = [r.path for r in app.routes]
+    assert "/api/v1/ws/options/{product_id}" in routes
+

@@ -12,16 +12,40 @@ import { API_BASE } from "@/lib/api";
 // klinecharts touches `window` on import, so it must never be evaluated during
 // server-side prerendering.
 const NativeChart = dynamic(
-    () => import("@/components/NativeChart").then((mod) => mod.NativeChart),
+    () => import("@/components/NativeChart").then((mod) => mod.NativeChart || mod.default),
     { ssr: false }
 );
 
 const API = `${API_BASE}/api/v1/backtest`;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
+interface Excursion {
+    n: number;
+    avg_mfe_r: number | null;
+    median_mfe_r: number | null;
+    best_mfe_r: number | null;
+    avg_mae_r: number | null;
+    /** The distance those trades' own targets demanded — not the new estimate. */
+    avg_target_r: number | null;
+    tp1_hits: number;
+    tp1_hit_rate: number;
+}
+
+interface TargetEstimate {
+    sufficient: boolean;
+    provisional: boolean;
+    n: number;
+    r_multiple: number | null;
+    ev_r: number | null;
+    hit_probability: number | null;
+    reason: string | null;
+}
+
 interface Stats {
     win_rate: number; total_closed: number; wins: number;
     losses: number; pending_count: number;
+    excursion: Excursion;
+    target_estimate: TargetEstimate;
 }
 
 interface Trade {
@@ -42,16 +66,16 @@ const fmt = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 4,
 const fmtDate = (ts: number) => ts ? new Date(ts * 1000).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "─";
 
 const statusStyle = (status: string, filled: boolean): React.CSSProperties => ({
-    WIN: { color: "#10B981", background: "rgba(16,185,129,0.12)", border: "none" },
-    PARTIAL_WIN: { color: "#34D399", background: "rgba(52,211,153,0.12)", border: "none" },
-    LOSS: { color: "#F43F5E", background: "rgba(244,63,94,0.12)", border: "none" },
-    BREAK_EVEN: { color: "#94A3B8", background: "rgba(148,163,184,0.12)", border: "none" },
-    ACTIVE_T2: { color: "#3B82F6", background: "rgba(59,130,246,0.12)", border: "none" },
+    WIN: { color: "var(--pos)", background: "rgba(16,185,129,0.12)", border: "none" },
+    PARTIAL_WIN: { color: "var(--pos-bright)", background: "rgba(52,211,153,0.12)", border: "none" },
+    LOSS: { color: "var(--neg)", background: "rgba(244,63,94,0.12)", border: "none" },
+    BREAK_EVEN: { color: "var(--text-3)", background: "rgba(148,163,184,0.12)", border: "none" },
+    ACTIVE_T2: { color: "var(--accent-blue)", background: "rgba(59,130,246,0.12)", border: "none" },
     // PENDING splits into WAITING (no fill) vs IN TRADE (filled, hunting T1)
     PENDING: filled
-        ? { color: "#F59E0B", background: "rgba(245,158,11,0.18)", border: "1px solid rgba(245,158,11,0.4)" }
-        : { color: "#64748B", background: "rgba(100,116,139,0.1)", border: "none" },
-}[status] || { color: "#E2E8F0", background: "rgba(255,255,255,0.05)", border: "none" });
+        ? { color: "var(--warn)", background: "rgba(245,158,11,0.18)", border: "1px solid rgba(245,158,11,0.4)" }
+        : { color: "var(--text-4)", background: "rgba(100,116,139,0.1)", border: "none" },
+}[status] || { color: "var(--text-2)", background: "rgba(255,255,255,0.05)", border: "none" });
 
 const statusLabel = (status: string, filled: boolean): string => ({
     WIN: "WIN ✓", PARTIAL_WIN: "PARTIAL WIN", LOSS: "LOSS ✗",
@@ -60,8 +84,8 @@ const statusLabel = (status: string, filled: boolean): string => ({
 }[status] ?? status);
 
 // ── Stat Card ──────────────────────────────────────────────────────────────────
-const StatCard: React.FC<{ label: string; value: string | number; sub?: string; color?: string; icon: React.ReactNode }> = ({ label, value, sub, color = "#E2E8F0", icon }) => (
-    <div style={{ background: "#0B0F19", border: "none", borderRadius: "10px", padding: "1.1rem 1.3rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+const StatCard: React.FC<{ label: string; value: string | number; sub?: string; color?: string; icon: React.ReactNode }> = ({ label, value, sub, color = "var(--text-2)", icon }) => (
+    <div style={{ background: "var(--surface-1)", border: "none", borderRadius: "10px", padding: "1.1rem 1.3rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: "var(--text-dim)", fontSize: "0.65rem", fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>
             {icon}{label}
         </div>
@@ -71,10 +95,11 @@ const StatCard: React.FC<{ label: string; value: string | number; sub?: string; 
 );
 
 // ── Win-Rate Ring ──────────────────────────────────────────────────────────────
-const WinRateRing: React.FC<{ rate: number }> = ({ rate }) => {
+const WinRateRing: React.FC<{ rate: number, total: number }> = ({ rate, total }) => {
+    const isProvisional = total < 30;
     const r = 54, circ = 2 * Math.PI * r;
     const offset = circ - (circ * rate) / 100;
-    const color = rate >= 60 ? "#10B981" : rate >= 45 ? "#F59E0B" : "#F43F5E";
+    const color = rate >= 60 ? "var(--pos)" : rate >= 45 ? "var(--warn)" : "var(--neg)";
     return (
         <div style={{ position: "relative", width: 140, height: 140, flexShrink: 0 }}>
             <svg width={140} height={140} viewBox="0 0 140 140">
@@ -86,6 +111,11 @@ const WinRateRing: React.FC<{ rate: number }> = ({ rate }) => {
             <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
                 <span style={{ fontSize: "1.6rem", fontWeight: 900, color, fontFamily: "var(--font-jetbrains)" }}>{rate.toFixed(0)}%</span>
                 <span style={{ fontSize: "0.55rem", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 800 }}>Win Rate</span>
+                {isProvisional && (
+                    <span className="mono" style={{ fontSize: "0.5rem", color: "var(--warn)", marginTop: "0.15rem" }}>
+                        PROV [N={total}]
+                    </span>
+                )}
             </div>
         </div>
     );
@@ -98,6 +128,7 @@ export default function EdgePage() {
     const [symbols, setSymbols] = useState<SymbolStat[]>([]);
     const [filterStatus, setFilterStatus] = useState<string>("ALL");
     const [filterSymbol, setFilterSymbol] = useState<string>("");
+    const [filterPipeline, setFilterPipeline] = useState<string>("v2.0");
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<"trades" | "symbols">("trades");
     const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
@@ -105,10 +136,13 @@ export default function EdgePage() {
     const load = useCallback(async () => {
         setLoading(true);
         try {
+            const pipeQ = filterPipeline !== "ALL" ? `?pipeline_version=${filterPipeline}` : "";
+            const pipeAnd = filterPipeline !== "ALL" ? `&pipeline_version=${filterPipeline}` : "";
+
             const [s, t, sym] = await Promise.all([
-                fetch(`${API}/stats`).then(r => r.json()),
-                fetch(`${API}/trades?limit=200${filterStatus !== "ALL" ? `&status=${filterStatus}` : ""}${filterSymbol ? `&symbol=${filterSymbol}` : ""}`).then(r => r.json()),
-                fetch(`${API}/symbols`).then(r => r.json()),
+                fetch(`${API}/stats${pipeQ}`).then(r => r.json()),
+                fetch(`${API}/trades?limit=200${filterStatus !== "ALL" ? `&status=${filterStatus}` : ""}${filterSymbol ? `&symbol=${filterSymbol}` : ""}${pipeAnd}`).then(r => r.json()),
+                fetch(`${API}/symbols${pipeQ}`).then(r => r.json()),
             ]);
             setStats(s);
             setTrades(t.trades || []);
@@ -116,30 +150,40 @@ export default function EdgePage() {
         } catch { } finally {
             setLoading(false);
         }
-    }, [filterStatus, filterSymbol]);
+    }, [filterStatus, filterSymbol, filterPipeline]);
 
     useEffect(() => { load(); }, [load]);
     useEffect(() => { const i = setInterval(load, 30000); return () => clearInterval(i); }, [load]);
 
     return (
-        <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: "var(--bg-dark)", color: "#E2E8F0" }}>
+        <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: "var(--bg-dark)", color: "var(--text-2)" }}>
 
             {/* ── Header ── */}
-            <header style={{ padding: "0.75rem 1.5rem", borderBottom: "none", background: "#080A0F", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+            <header style={{ padding: "0.75rem 1.5rem", borderBottom: "none", background: "var(--surface-3)", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                     <Link href="/" style={{ display: "flex", alignItems: "center", gap: "0.5rem", textDecoration: "none" }}>
                         <div style={{ background: "rgba(6,182,212,0.15)", border: "none", padding: "0.3rem", borderRadius: "6px", display: "flex" }}>
-                            <Zap size={16} color="#06B6D4" fill="#06B6D4" />
+                            <Zap size={16} color="var(--info)" fill="var(--info)" />
                         </div>
                         <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--text-muted)", letterSpacing: "0.05em" }}>TOP PICKER TERMINAL</span>
                     </Link>
                     <span style={{ color: "var(--panel-border)" }}>|</span>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                        <Activity size={14} color="#06B6D4" />
-                        <span style={{ fontSize: "0.8rem", fontWeight: 800, color: "#E2E8F0", letterSpacing: "0.03em" }}>STATISTICAL EDGE TRACKER</span>
+                        <Activity size={14} color="var(--info)" />
+                        <span style={{ fontSize: "0.8rem", fontWeight: 800, color: "var(--text-2)", letterSpacing: "0.03em" }}>STATISTICAL EDGE TRACKER</span>
                     </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <select
+                        value={filterPipeline}
+                        onChange={e => setFilterPipeline(e.target.value)}
+                        style={{ background: "rgba(255,255,255,0.04)", border: "none", color: "var(--info)", padding: "0.35rem 0.5rem", borderRadius: "6px", outline: "none", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                    >
+                        <option value="ALL">ALL COHORTS</option>
+                        <option value="v1.0">LEGACY (v1.0)</option>
+                        <option value="v2.0">NEW (v2.0)</option>
+                        <option value="v2.0_recovered">v2.0 (RECOVERED)</option>
+                    </select>
                     <button onClick={load} disabled={loading} style={{ background: "rgba(255,255,255,0.04)", border: "none", color: "var(--text-muted)", padding: "0.35rem 0.75rem", borderRadius: "6px", cursor: "pointer", display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem", fontWeight: 700 }}>
                         <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} /> REFRESH
                     </button>
@@ -155,24 +199,89 @@ export default function EdgePage() {
                 {stats && (
                     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr 1fr 1fr 1fr", gap: "1rem", alignItems: "stretch" }}>
                         {/* Ring */}
-                        <div style={{ background: "#0B0F19", border: "none", borderRadius: "10px", padding: "1rem 1.5rem", display: "flex", alignItems: "center", gap: "1.5rem" }}>
-                            <WinRateRing rate={stats.win_rate} />
+                        <div style={{ background: "var(--surface-1)", border: "none", borderRadius: "10px", padding: "1rem 1.5rem", display: "flex", alignItems: "center", gap: "1.5rem" }}>
+                            <WinRateRing rate={stats.win_rate} total={stats.total_closed} />
                             <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-                                <div style={{ fontSize: "0.65rem", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 800 }}>System Edge</div>
+                                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                    <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 800 }}>System Edge</span>
+                                    {stats.total_closed < 30 && (
+                                        <span className="mono" style={{ fontSize: "0.55rem", color: "var(--warn)" }}>STAT PROVISIONAL · AWAITING LARGE N</span>
+                                    )}
+                                </div>
                                 <div style={{ display: "flex", gap: "1rem" }}>
-                                    <div><div style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Wins</div><div style={{ fontSize: "1.2rem", fontWeight: 900, color: "#10B981", fontFamily: "var(--font-jetbrains)" }}>{stats.wins}</div></div>
-                                    <div><div style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Losses</div><div style={{ fontSize: "1.2rem", fontWeight: 900, color: "#F43F5E", fontFamily: "var(--font-jetbrains)" }}>{stats.losses}</div></div>
-                                    <div><div style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Pending</div><div style={{ fontSize: "1.2rem", fontWeight: 900, color: "#F59E0B", fontFamily: "var(--font-jetbrains)" }}>{stats.pending_count}</div></div>
+                                    <div><div style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Wins</div><div style={{ fontSize: "1.2rem", fontWeight: 900, color: "var(--pos)", fontFamily: "var(--font-jetbrains)" }}>{stats.wins}</div></div>
+                                    <div><div style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Losses</div><div style={{ fontSize: "1.2rem", fontWeight: 900, color: "var(--neg)", fontFamily: "var(--font-jetbrains)" }}>{stats.losses}</div></div>
+                                    <div><div style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Pending</div><div style={{ fontSize: "1.2rem", fontWeight: 900, color: "var(--warn)", fontFamily: "var(--font-jetbrains)" }}>{stats.pending_count}</div></div>
                                 </div>
                             </div>
                         </div>
                         <StatCard icon={<Activity size={12} />} label="Total Signals" value={stats.total_closed + stats.pending_count} sub="All-time logged setups" />
-                        <StatCard icon={<TrendingUp size={12} />} label="Closed Trades" value={stats.total_closed} sub="WIN + LOSS evaluated" color="#06B6D4" />
-                        <StatCard icon={<Trophy size={12} />} label="Win Rate" value={`${stats.win_rate.toFixed(1)}%`} sub={`${stats.wins}W / ${stats.losses}L record`} color={stats.win_rate >= 50 ? "#10B981" : "#F59E0B"} />
-                        <StatCard icon={<Clock size={12} />} label="Active Tests" value={stats.pending_count} sub="Forward-testing now" color="#F59E0B" />
-                        <StatCard icon={<Filter size={12} />} label="Unique Symbols" value={symbols.length} sub="In the edge ledger" color="#A78BFA" />
+                        <StatCard icon={<TrendingUp size={12} />} label="Closed Trades" value={stats.total_closed} sub="WIN + LOSS evaluated" color="var(--info)" />
+                        <StatCard icon={<Trophy size={12} />} label="Win Rate" value={`${stats.win_rate.toFixed(1)}%`} sub={`${stats.wins}W / ${stats.losses}L record`} color={stats.win_rate >= 50 ? "var(--pos)" : "var(--warn)"} />
+                        <StatCard icon={<Clock size={12} />} label="Active Tests" value={stats.pending_count} sub="Forward-testing now" color="var(--warn)" />
+                        <StatCard icon={<Filter size={12} />} label="Unique Symbols" value={symbols.length} sub="In the edge ledger" color="var(--accent-purple-bright)" />
                     </div>
                 )}
+
+                {/* ── Exit geometry ──────────────────────────────────────────────
+                    A bare win rate cannot tell "the entries are wrong" apart from
+                    "the target is impossible". These numbers can: how far trades
+                    actually ran, in R, against what their targets demanded. */}
+                {stats?.excursion && stats.excursion.n > 0 && (() => {
+                    const ex = stats.excursion;
+                    const te = stats.target_estimate;
+                    const noHits = ex.tp1_hits === 0;
+                    const fmtR = (v: number | null) => (v === null ? "—" : `${v.toFixed(2)}R`);
+                    return (
+                        <div style={{ background: "var(--surface-1)", borderRadius: "10px", padding: "1rem 1.25rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                                <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 800 }}>
+                                    Exit geometry — how far trades actually ran
+                                </span>
+                                {te?.provisional && (
+                                    <span className="mono" style={{ fontSize: "0.6rem", color: "var(--warn)" }}>
+                                        TARGET PROVISIONAL · {te.n} closed trade{te.n === 1 ? "" : "s"}
+                                    </span>
+                                )}
+                            </div>
+
+                            <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap" }}>
+                                {([
+                                    ["Median MFE", fmtR(ex.median_mfe_r), "var(--info)"],
+                                    ["Best MFE", fmtR(ex.best_mfe_r), "var(--pos)"],
+                                    ["Avg MAE", fmtR(ex.avg_mae_r), "var(--neg)"],
+                                    ["Target demanded", fmtR(ex.avg_target_r), "var(--warn)"],
+                                    ["Target 1 now", te?.r_multiple != null ? `${te.r_multiple.toFixed(2)}R` : "2.00R", "var(--accent-purple-bright)"],
+                                ]).map(([label, value, color]) => (
+                                    <div key={label} style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                                        <span style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>{label}</span>
+                                        <span className="mono" style={{ fontSize: "1.1rem", fontWeight: 900, color }}>{value}</span>
+                                    </div>
+                                ))}
+                                <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                                    <span style={{ fontSize: "0.6rem", color: "var(--text-dim)", textTransform: "uppercase" }}>Reached own target</span>
+                                    <span className="mono" style={{ fontSize: "1.1rem", fontWeight: 900, color: noHits ? "var(--neg)" : "var(--pos)" }}>
+                                        {ex.tp1_hits}/{ex.n}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <p style={{ margin: 0, fontSize: "0.72rem", color: "var(--text-muted)", lineHeight: 1.65 }}>
+                                {noHits ? (
+                                    <>
+                                        <strong style={{ color: "var(--neg)" }}>No closed trade has ever reached the target it was published with.</strong>{" "}
+                                        The best favourable excursion on record is {fmtR(ex.best_mfe_r)}, against the{" "}
+                                        {fmtR(ex.avg_target_r)} those trades were issued — so a WIN was arithmetically out of
+                                        reach, and the 0% was a fact about the target rather than about the market.
+                                    </>
+                                ) : (
+                                    <>{ex.tp1_hits} of {ex.n} closed trades have reached their published target ({ex.tp1_hit_rate}%).</>
+                                )}
+                                {te?.reason && <><br /><span style={{ color: "var(--warn)" }}>{te.reason}</span></>}
+                            </p>
+                        </div>
+                    );
+                })()}
 
                 {/* ── Tabs + Filters ── */}
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
@@ -184,7 +293,7 @@ export default function EdgePage() {
                                 fontWeight: 800, fontSize: "0.75rem", cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.04em",
                                 background: activeTab === tab ? "rgba(6,182,212,0.15)" : "transparent",
                                 borderColor: activeTab === tab ? "rgba(6,182,212,0.4)" : "var(--panel-border)",
-                                color: activeTab === tab ? "#06B6D4" : "var(--text-muted)",
+                                color: activeTab === tab ? "var(--info)" : "var(--text-muted)",
                             }}>
                                 {tab === "trades" ? `Trade Ledger (${trades.length})` : `Symbol Leaderboard (${symbols.length})`}
                             </button>
@@ -200,7 +309,7 @@ export default function EdgePage() {
                                     fontWeight: 800, fontSize: "0.68rem", cursor: "pointer",
                                     background: filterStatus === s ? "rgba(6,182,212,0.1)" : "transparent",
                                     borderColor: filterStatus === s ? "rgba(6,182,212,0.35)" : "var(--panel-border)",
-                                    color: filterStatus === s ? "#06B6D4" : "var(--text-dim)",
+                                    color: filterStatus === s ? "var(--info)" : "var(--text-dim)",
                                 }}>
                                     {s === "PENDING" ? "PENDING (Tagged)" : s === "ACTIVE_T2" ? "ACTIVE T2" : s}
                                 </button>
@@ -209,7 +318,7 @@ export default function EdgePage() {
                                 type="text" placeholder="Filter symbol..."
                                 value={filterSymbol}
                                 onChange={e => setFilterSymbol(e.target.value.toUpperCase())}
-                                style={{ background: "rgba(255,255,255,0.04)", border: "none", borderRadius: "6px", padding: "0.35rem 0.7rem", color: "#E2E8F0", fontSize: "0.75rem", outline: "none", fontFamily: "var(--font-jetbrains)", width: "140px" }}
+                                style={{ background: "rgba(255,255,255,0.04)", border: "none", borderRadius: "6px", padding: "0.35rem 0.7rem", color: "var(--text-2)", fontSize: "0.75rem", outline: "none", fontFamily: "var(--font-jetbrains)", width: "140px" }}
                             />
                         </div>
                     )}
@@ -217,12 +326,12 @@ export default function EdgePage() {
 
                 {/* ── Trade Ledger Table ── */}
                 {activeTab === "trades" && (
-                    <div style={{ background: "#080A0F", border: "none", borderRadius: "12px", overflow: "hidden", flex: 1 }}>
+                    <div style={{ background: "var(--surface-3)", border: "none", borderRadius: "12px", overflow: "hidden", flex: 1 }}>
                         {/* Table Header */}
-                        <div style={{ display: "grid", gridTemplateColumns: "1.8fr 0.9fr 0.8fr 1.4fr 1.2fr 1.2fr 1.2fr 0.9fr 0.9fr 0.9fr 1.4fr 1.4fr", gap: "0.5rem", padding: "0.65rem 1.1rem", background: "#0B0F19", borderBottom: "none", fontSize: "0.58rem", fontWeight: 800, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1.8fr 0.9fr 0.8fr 1.4fr 1.2fr 1.2fr 1.2fr 0.9fr 0.9fr 0.9fr 1.4fr 1.4fr", gap: "0.5rem", padding: "0.65rem 1.1rem", background: "var(--surface-1)", borderBottom: "none", fontSize: "0.58rem", fontWeight: 800, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
                             <span>Symbol</span><span>Label</span><span>Score</span>
                             <span>Zone Price</span><span>TP</span><span>SL</span>
-                            <span style={{ color: "#F59E0B" }}>Fill Price</span>
+                            <span style={{ color: "var(--warn)" }}>Fill Price</span>
                             <span>Status</span><span>MFE</span><span>MAE</span>
                             <span>Signal Fired</span><span>Filled / Closed</span>
                         </div>
@@ -240,45 +349,45 @@ export default function EdgePage() {
                                     onMouseEnter={e => (e.currentTarget.style.background = "rgba(6, 182, 212, 0.08)")}
                                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
                                     <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                                        <span style={{ fontWeight: 800, color: "#E2E8F0", fontSize: "0.82rem" }}>
+                                        <span style={{ fontWeight: 800, color: "var(--text-2)", fontSize: "0.82rem" }}>
                                             {t.symbol}
                                         </span>
-                                        <span style={{ fontSize: "0.6rem", color: "#06B6D4", background: "rgba(6,182,212,0.15)", padding: "0.1rem 0.3rem", borderRadius: "4px", fontWeight: 700 }}>
+                                        <span style={{ fontSize: "0.6rem", color: "var(--info)", background: "rgba(6,182,212,0.15)", padding: "0.1rem 0.3rem", borderRadius: "4px", fontWeight: 700 }}>
                                             INSPECT 🔍
                                         </span>
                                     </div>
-                                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: t.label === "ENTRY_ZONE" ? "#10B981" : "#06B6D4" }}>{t.label}</span>
-                                    <span className="mono" style={{ fontSize: "0.78rem", color: "#E2E8F0" }}>{t.score?.toFixed(0)}</span>
+                                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: t.label === "ENTRY_ZONE" ? "var(--pos)" : "var(--info)" }}>{t.label}</span>
+                                    <span className="mono" style={{ fontSize: "0.78rem", color: "var(--text-2)" }}>{t.score?.toFixed(0)}</span>
 
                                     {/* Prices */}
-                                    <span className="mono" style={{ fontSize: "0.72rem", color: "#06B6D4" }}>${fmt(t.entry_price)}</span>
-                                    <span className="mono" style={{ fontSize: "0.72rem", color: "#10B981" }}>${fmt(t.tp_price)}</span>
-                                    <span className="mono" style={{ fontSize: "0.72rem", color: "#F43F5E" }}>${fmt(t.sl_price)}</span>
+                                    <span className="mono" style={{ fontSize: "0.72rem", color: "var(--info)" }}>${fmt(t.entry_price)}</span>
+                                    <span className="mono" style={{ fontSize: "0.72rem", color: "var(--pos)" }}>${fmt(t.tp_price)}</span>
+                                    <span className="mono" style={{ fontSize: "0.72rem", color: "var(--neg)" }}>${fmt(t.sl_price)}</span>
 
                                     {/* Fill Price — highlight if filled vs pending entry */}
                                     <div style={{ display: "flex", flexDirection: "column", gap: "1px" }}>
                                         {t.fill_price ? (
-                                            <span className="mono" style={{ fontSize: "0.72rem", color: "#F59E0B", fontWeight: 800 }}>${fmt(t.fill_price)}</span>
+                                            <span className="mono" style={{ fontSize: "0.72rem", color: "var(--warn)", fontWeight: 800 }}>${fmt(t.fill_price)}</span>
                                         ) : t.status === "PENDING" ? (
                                             <span style={{ fontSize: "0.65rem", color: "rgba(245,158,11,0.5)", fontStyle: "italic" }}>Pending Fill</span>
                                         ) : (
-                                            <span className="mono" style={{ fontSize: "0.72rem", color: "#F59E0B", fontWeight: 800 }}>${fmt(t.entry_price)}</span>
+                                            <span className="mono" style={{ fontSize: "0.72rem", color: "var(--warn)", fontWeight: 800 }}>${fmt(t.entry_price)}</span>
                                         )}
                                     </div>
 
                                     <span style={{ ...statusStyle(t.status, !!t.filled_at), padding: "0.15rem 0.45rem", borderRadius: "5px", fontSize: "0.58rem", fontWeight: 800, textAlign: "center", whiteSpace: "nowrap" }}>
                                         {statusLabel(t.status, !!t.filled_at)}
                                     </span>
-                                    <span className="mono" style={{ fontSize: "0.7rem", color: t.mfe > 0 ? "#10B981" : "var(--text-dim)" }}>{t.mfe ? `+${t.mfe.toFixed(2)}%` : "─"}</span>
-                                    <span className="mono" style={{ fontSize: "0.7rem", color: t.mae < 0 ? "#F43F5E" : "var(--text-dim)" }}>{t.mae ? `${t.mae.toFixed(2)}%` : "─"}</span>
+                                    <span className="mono" style={{ fontSize: "0.7rem", color: t.mfe > 0 ? "var(--pos)" : "var(--text-dim)" }}>{t.mfe ? `+${t.mfe.toFixed(2)}%` : "─"}</span>
+                                    <span className="mono" style={{ fontSize: "0.7rem", color: t.mae < 0 ? "var(--neg)" : "var(--text-dim)" }}>{t.mae ? `${t.mae.toFixed(2)}%` : "─"}</span>
 
                                     {/* Timestamps */}
                                     <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
                                         <span style={{ fontSize: "0.62rem", color: "var(--text-dim)" }}>{fmtDate(t.timestamp)}</span>
                                     </div>
                                     <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                                        {t.filled_at && <span style={{ fontSize: "0.62rem", color: "#F59E0B" }}>▶ {fmtDate(t.filled_at)}</span>}
-                                        {t.closed_at && <span style={{ fontSize: "0.62rem", color: (t.status === "WIN" || t.status === "PARTIAL_WIN") ? "#10B981" : t.status === "BREAK_EVEN" ? "#94A3B8" : "#F43F5E" }}>✕ {fmtDate(t.closed_at)}</span>}
+                                        {t.filled_at && <span style={{ fontSize: "0.62rem", color: "var(--warn)" }}>▶ {fmtDate(t.filled_at)}</span>}
+                                        {t.closed_at && <span style={{ fontSize: "0.62rem", color: (t.status === "WIN" || t.status === "PARTIAL_WIN") ? "var(--pos)" : t.status === "BREAK_EVEN" ? "var(--text-3)" : "var(--neg)" }}>✕ {fmtDate(t.closed_at)}</span>}
                                         {!t.filled_at && !t.closed_at && <span style={{ fontSize: "0.62rem", color: "rgba(255,255,255,0.2)", fontStyle: "italic" }}>Pending fill</span>}
                                     </div>
                                 </div>
@@ -289,8 +398,8 @@ export default function EdgePage() {
 
                 {/* ── Symbol Leaderboard ── */}
                 {activeTab === "symbols" && (
-                    <div style={{ background: "#080A0F", border: "none", borderRadius: "12px", overflow: "hidden", flex: 1 }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1.5fr 1.5fr 1.5fr", gap: "0.5rem", padding: "0.65rem 1.1rem", background: "#0B0F19", borderBottom: "none", fontSize: "0.6rem", fontWeight: 800, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    <div style={{ background: "var(--surface-3)", border: "none", borderRadius: "12px", overflow: "hidden", flex: 1 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1.5fr 1.5fr 1.5fr", gap: "0.5rem", padding: "0.65rem 1.1rem", background: "var(--surface-1)", borderBottom: "none", fontSize: "0.6rem", fontWeight: 800, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
                             <span>Symbol</span><span>Wins</span><span>Losses</span><span>Pending</span><span>Total</span><span>Win Rate</span><span>Avg MFE</span><span>Avg Score</span>
                         </div>
                         <div style={{ overflowY: "auto", maxHeight: "calc(100vh - 380px)" }}>
@@ -301,31 +410,31 @@ export default function EdgePage() {
                                     onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.02)")}
                                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
                                     <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                                        <span style={{ fontWeight: 800, fontSize: "0.65rem", color: i < 3 ? ["#F59E0B", "#94A3B8", "#CD7F32"][i] : "var(--text-dim)", width: "18px", textAlign: "center" }}>
+                                        <span style={{ fontWeight: 800, fontSize: "0.65rem", color: i < 3 ? ["var(--warn)", "var(--text-3)", "var(--rank-3)"][i] : "var(--text-dim)", width: "18px", textAlign: "center" }}>
                                             {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`}
                                         </span>
-                                        <Link href={`/market/${s.symbol}`} style={{ fontWeight: 800, color: "#E2E8F0", fontSize: "0.82rem", textDecoration: "none" }}
-                                            onMouseEnter={e => (e.currentTarget.style.color = "#06B6D4")}
-                                            onMouseLeave={e => (e.currentTarget.style.color = "#E2E8F0")}>
+                                        <Link href={`/market/${s.symbol}`} style={{ fontWeight: 800, color: "var(--text-2)", fontSize: "0.82rem", textDecoration: "none" }}
+                                            onMouseEnter={e => (e.currentTarget.style.color = "var(--info)")}
+                                            onMouseLeave={e => (e.currentTarget.style.color = "var(--text-2)")}>
                                             {s.symbol}
                                         </Link>
                                     </div>
-                                    <span className="mono" style={{ color: "#10B981", fontWeight: 800 }}>{s.wins}</span>
-                                    <span className="mono" style={{ color: "#F43F5E", fontWeight: 800 }}>{s.losses}</span>
-                                    <span className="mono" style={{ color: "#F59E0B" }}>{s.pending}</span>
+                                    <span className="mono" style={{ color: "var(--pos)", fontWeight: 800 }}>{s.wins}</span>
+                                    <span className="mono" style={{ color: "var(--neg)", fontWeight: 800 }}>{s.losses}</span>
+                                    <span className="mono" style={{ color: "var(--warn)" }}>{s.pending}</span>
                                     <span className="mono" style={{ color: "var(--text-muted)" }}>{s.total}</span>
                                     <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
                                         <div style={{ flex: 1, height: "4px", background: "rgba(255,255,255,0.06)", borderRadius: "2px", overflow: "hidden" }}>
-                                            {s.win_rate !== null && <div style={{ width: `${s.win_rate}%`, height: "100%", background: s.win_rate >= 60 ? "#10B981" : s.win_rate >= 45 ? "#F59E0B" : "#F43F5E", borderRadius: "2px", transition: "width 0.6s ease" }} />}
+                                            {s.win_rate !== null && <div style={{ width: `${s.win_rate}%`, height: "100%", background: s.win_rate >= 60 ? "var(--pos)" : s.win_rate >= 45 ? "var(--warn)" : "var(--neg)", borderRadius: "2px", transition: "width 0.6s ease" }} />}
                                         </div>
-                                        <span className="mono" style={{ fontSize: "0.75rem", fontWeight: 800, color: s.win_rate === null ? "var(--text-dim)" : s.win_rate >= 60 ? "#10B981" : s.win_rate >= 45 ? "#F59E0B" : "#F43F5E" }}>
+                                        <span className="mono" style={{ fontSize: "0.75rem", fontWeight: 800, color: s.win_rate === null ? "var(--text-dim)" : s.win_rate >= 60 ? "var(--pos)" : s.win_rate >= 45 ? "var(--warn)" : "var(--neg)" }}>
                                             {s.win_rate !== null ? `${s.win_rate}%` : "─"}
                                         </span>
                                     </div>
-                                    <span className="mono" style={{ fontSize: "0.75rem", color: s.avg_mfe && s.avg_mfe > 0 ? "#10B981" : "var(--text-dim)" }}>
+                                    <span className="mono" style={{ fontSize: "0.75rem", color: s.avg_mfe && s.avg_mfe > 0 ? "var(--pos)" : "var(--text-dim)" }}>
                                         {s.avg_mfe ? `+${s.avg_mfe.toFixed(2)}%` : "─"}
                                     </span>
-                                    <span className="mono" style={{ fontSize: "0.75rem", color: "#06B6D4" }}>
+                                    <span className="mono" style={{ fontSize: "0.75rem", color: "var(--info)" }}>
                                         {s.avg_score ? s.avg_score.toFixed(0) : "─"}
                                     </span>
                                 </div>
@@ -343,19 +452,19 @@ export default function EdgePage() {
                     display: "flex", alignItems: "center", justifyContent: "center", padding: "1.5rem"
                 }}>
                     <div style={{
-                        background: "#0B0F19", border: "none",
+                        background: "var(--surface-1)", border: "none",
                         borderRadius: "16px", width: "100%", maxWidth: "1250px", maxHeight: "94vh",
                         display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.7)"
                     }}>
                         {/* Top Modal Header */}
                         <div style={{
-                            padding: "1rem 1.5rem", background: "#080A0F", borderBottom: "none",
+                            padding: "1rem 1.5rem", background: "var(--surface-3)", borderBottom: "none",
                             display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0
                         }}>
                             <div style={{ display: "flex", alignItems: "center", gap: "0.8rem", flexWrap: "wrap" }}>
                                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                    <Eye size={18} color="#06B6D4" />
-                                    <span style={{ fontSize: "1.1rem", fontWeight: 900, color: "#FFF", fontFamily: "var(--font-jetbrains)" }}>
+                                    <Eye size={18} color="var(--info)" />
+                                    <span style={{ fontSize: "1.1rem", fontWeight: 900, color: "var(--text-strong)", fontFamily: "var(--font-jetbrains)" }}>
                                         {selectedTrade.symbol}
                                     </span>
                                 </div>
@@ -364,13 +473,13 @@ export default function EdgePage() {
                                 <span style={{
                                     padding: "0.2rem 0.55rem", borderRadius: "5px", fontSize: "0.65rem", fontWeight: 800,
                                     background: selectedTrade.sl_price > selectedTrade.entry_price ? "rgba(244,63,94,0.18)" : "rgba(16,185,129,0.18)",
-                                    color: selectedTrade.sl_price > selectedTrade.entry_price ? "#F43F5E" : "#10B981",
+                                    color: selectedTrade.sl_price > selectedTrade.entry_price ? "var(--neg)" : "var(--pos)",
                                     border: selectedTrade.sl_price > selectedTrade.entry_price ? "1px solid rgba(244,63,94,0.3)" : "1px solid rgba(16,185,129,0.3)"
                                 }}>
                                     {selectedTrade.sl_price > selectedTrade.entry_price ? "SHORT" : "LONG"}
                                 </span>
 
-                                <span style={{ padding: "0.2rem 0.55rem", borderRadius: "5px", fontSize: "0.65rem", fontWeight: 800, background: "rgba(6,182,212,0.12)", color: "#06B6D4", border: "none" }}>
+                                <span style={{ padding: "0.2rem 0.55rem", borderRadius: "5px", fontSize: "0.65rem", fontWeight: 800, background: "rgba(6,182,212,0.12)", color: "var(--info)", border: "none" }}>
                                     {selectedTrade.label}
                                 </span>
 
@@ -385,7 +494,7 @@ export default function EdgePage() {
                                     target="_blank"
                                     style={{
                                         background: "rgba(6, 182, 212, 0.15)", border: "none",
-                                        color: "#06B6D4", padding: "0.4rem 0.85rem", borderRadius: "6px",
+                                        color: "var(--info)", padding: "0.4rem 0.85rem", borderRadius: "6px",
                                         fontSize: "0.72rem", fontWeight: 800, textDecoration: "none",
                                         display: "flex", alignItems: "center", gap: "0.4rem"
                                     }}
@@ -410,19 +519,19 @@ export default function EdgePage() {
                             <div style={{ display: "flex", alignItems: "center", gap: "1.5rem" }}>
                                 <div>
                                     <div style={{ fontSize: "0.58rem", color: "var(--text-dim)", textTransform: "uppercase", fontWeight: 800 }}>Entry Zone</div>
-                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "#06B6D4" }}>${fmt(selectedTrade.entry_price)}</div>
+                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "var(--info)" }}>${fmt(selectedTrade.entry_price)}</div>
                                 </div>
                                 <div>
                                     <div style={{ fontSize: "0.58rem", color: "var(--text-dim)", textTransform: "uppercase", fontWeight: 800 }}>Take Profit (TP)</div>
-                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "#10B981" }}>${fmt(selectedTrade.tp_price)}</div>
+                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "var(--pos)" }}>${fmt(selectedTrade.tp_price)}</div>
                                 </div>
                                 <div>
                                     <div style={{ fontSize: "0.58rem", color: "var(--text-dim)", textTransform: "uppercase", fontWeight: 800 }}>Stop Loss (SL)</div>
-                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "#F43F5E" }}>${fmt(selectedTrade.sl_price)}</div>
+                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "var(--neg)" }}>${fmt(selectedTrade.sl_price)}</div>
                                 </div>
                                 <div>
                                     <div style={{ fontSize: "0.58rem", color: "var(--text-dim)", textTransform: "uppercase", fontWeight: 800 }}>Fill Price</div>
-                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "#F59E0B" }}>
+                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: "var(--warn)" }}>
                                         {selectedTrade.fill_price ? `$${fmt(selectedTrade.fill_price)}` : selectedTrade.status === "PENDING" ? "Pending Fill" : `$${fmt(selectedTrade.entry_price)}`}
                                     </div>
                                 </div>
@@ -431,13 +540,13 @@ export default function EdgePage() {
                             <div style={{ display: "flex", alignItems: "center", gap: "1.5rem" }}>
                                 <div>
                                     <div style={{ fontSize: "0.58rem", color: "var(--text-dim)", textTransform: "uppercase", fontWeight: 800 }}>Max Gain (MFE)</div>
-                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: selectedTrade.mfe > 0 ? "#10B981" : "var(--text-dim)" }}>
+                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: selectedTrade.mfe > 0 ? "var(--pos)" : "var(--text-dim)" }}>
                                         {selectedTrade.mfe ? `+${selectedTrade.mfe.toFixed(2)}%` : "0.00%"}
                                     </div>
                                 </div>
                                 <div>
                                     <div style={{ fontSize: "0.58rem", color: "var(--text-dim)", textTransform: "uppercase", fontWeight: 800 }}>Max Drawdown (MAE)</div>
-                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: selectedTrade.mae < 0 ? "#F43F5E" : "var(--text-dim)" }}>
+                                    <div className="mono" style={{ fontSize: "0.88rem", fontWeight: 800, color: selectedTrade.mae < 0 ? "var(--neg)" : "var(--text-dim)" }}>
                                         {selectedTrade.mae ? `${selectedTrade.mae.toFixed(2)}%` : "0.00%"}
                                     </div>
                                 </div>

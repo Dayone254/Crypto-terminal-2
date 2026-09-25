@@ -30,9 +30,48 @@ def _fib_levels(low: float, high: float) -> dict[str, float]:
     }
 
 
+def _return_pct(candles: list[list[Any]] | None, lookback: int) -> float | None:
+    """Percent return over the last ``lookback`` candles. Candles must be oldest first.
+
+    Returns None when history is too short to measure the horizon honestly — a
+    fabricated return is worse than a missing one, because the scorer cannot tell
+    a guess from an observation.
+    """
+    if not candles:
+        return None
+    closes = [float(c[4]) for c in candles if len(c) >= 5]
+    if len(closes) < lookback + 1:
+        return None
+    past = closes[-(lookback + 1)]
+    if past <= 0:
+        return None
+    return round((closes[-1] / past - 1.0) * 100.0, 4)
+
+
+def multi_horizon_returns(
+    raw_candles_1h: list[list[Any]] | None,
+    raw_candles_1d: list[list[Any]] | None,
+) -> dict[str, float | None]:
+    """Returns over 1h / 24h / 7d / 30d / 60d.
+
+    Used to build the relative-strength benchmark (BTC) and each symbol's own
+    returns, so both sides of the comparison are measured by the same code over
+    the same windows.
+    """
+    sorted_1h = sorted(raw_candles_1h, key=lambda c: float(c[0])) if raw_candles_1h else None
+    sorted_1d = sorted(raw_candles_1d, key=lambda c: float(c[0])) if raw_candles_1d else None
+    return {
+        "ret_1h": _return_pct(sorted_1h, 1),
+        "ret_24h": _return_pct(sorted_1h, 24),
+        "ret_7d": _return_pct(sorted_1d, 7),
+        "ret_30d": _return_pct(sorted_1d, 30),
+        "ret_60d": _return_pct(sorted_1d, 60),
+    }
+
+
 def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
     """Compute RSI using Wilder's smoothing.
-    
+
     `closes` must be ordered oldest first (chronological).
     Returns None if there are fewer than period + 1 prices.
     """
@@ -250,6 +289,7 @@ def compute_features(
     raw_candles_1d: list[list[Any]] | None = None,
     btc_day_change_pct: float | None = None,
     l2_snapshot: dict[str, Any] | None = None,
+    btc_returns: dict[str, float] | None = None,
     raw_candles_15m: list[list[Any]] | None = None,
     raw_candles_6h: list[list[Any]] | None = None,
 ) -> FeatureDict:
@@ -309,15 +349,40 @@ def compute_features(
     # 1h RSI (Wilder's smoothing)
     rsi_1h: float | None = None
     if raw_candles_1h:
-        # Sort candles ascending by timestamp (c[0])
-        sorted_1h = sorted(raw_candles_1h, key=lambda c: float(c[0]))
-        closes_1h = [float(c[4]) for c in sorted_1h if len(c) >= 5]
+        closes_1h = [float(c[4]) for c in raw_candles_1h if len(c) >= 5]
         rsi_1h = _compute_rsi(closes_1h, period=14)
 
-    # RS vs BTC
+    # RS vs BTC — multi-horizon.
     rs_vs_btc = day_change_pct - btc_day_change_pct if btc_day_change_pct is not None else 0.0
 
-    # (Swings moved up)
+    own_returns = multi_horizon_returns(raw_candles_1h, raw_candles_1d)
+    ret_1h = own_returns["ret_1h"]
+    ret_24h = own_returns["ret_24h"]
+    ret_7d = own_returns["ret_7d"]
+    ret_30d = own_returns["ret_30d"]
+    ret_60d = own_returns["ret_60d"]
+
+    btc_ret = btc_returns or {}
+    rs_vs_btc_1h = (
+        round(ret_1h - btc_ret["ret_1h"], 4)
+        if ret_1h is not None and btc_ret.get("ret_1h") is not None
+        else None
+    )
+    rs_vs_btc_7d = (
+        round(ret_7d - btc_ret["ret_7d"], 4)
+        if ret_7d is not None and btc_ret.get("ret_7d") is not None
+        else None
+    )
+    rs_vs_btc_30d = (
+        round(ret_30d - btc_ret["ret_30d"], 4)
+        if ret_30d is not None and btc_ret.get("ret_30d") is not None
+        else None
+    )
+    rs_vs_btc_60d = (
+        round(ret_60d - btc_ret["ret_60d"], 4)
+        if ret_60d is not None and btc_ret.get("ret_60d") is not None
+        else None
+    )
 
     # 14d ATR (Average True Range)
     atr_14d: float | None = None
@@ -355,52 +420,45 @@ def compute_features(
     # 15m RSI
     rsi_15m: float | None = None
     if raw_candles_15m:
-        sorted_15m = sorted(raw_candles_15m, key=lambda c: float(c[0]))
-        closes_15m = [float(c[4]) for c in sorted_15m if len(c) >= 5]
+        closes_15m = [float(c[4]) for c in raw_candles_15m if len(c) >= 5]
         rsi_15m = _compute_rsi(closes_15m, period=14)
 
     # 6h RSI
     rsi_6h: float | None = None
     if raw_candles_6h:
-        sorted_6h = sorted(raw_candles_6h, key=lambda c: float(c[0]))
-        closes_6h = [float(c[4]) for c in sorted_6h if len(c) >= 5]
+        closes_6h = [float(c[4]) for c in raw_candles_6h if len(c) >= 5]
         rsi_6h = _compute_rsi(closes_6h, period=14)
 
     # 1h MACD (12, 26, 9)
     macd_1h: float | None = None
     macd_signal_1h: float | None = None
     if raw_candles_1h:
-        sorted_1h_macd = sorted(raw_candles_1h, key=lambda c: float(c[0]))
-        closes_1h_macd = [float(c[4]) for c in sorted_1h_macd if len(c) >= 5]
+        closes_1h_macd = [float(c[4]) for c in raw_candles_1h if len(c) >= 5]
         macd_1h, macd_signal_1h, _ = _compute_macd(closes_1h_macd)
 
     # 1h Bollinger Bands (20, 2σ)
     bb_width_1h: float | None = None
     bb_pct_b_1h: float | None = None
     if raw_candles_1h:
-        sorted_1h_bb = sorted(raw_candles_1h, key=lambda c: float(c[0]))
-        closes_1h_bb = [float(c[4]) for c in sorted_1h_bb if len(c) >= 5]
+        closes_1h_bb = [float(c[4]) for c in raw_candles_1h if len(c) >= 5]
         bb_width_1h, bb_pct_b_1h, _ = _compute_bollinger(closes_1h_bb)
 
     # 1h ATR (14-period)
     atr_1h: float | None = None
     if raw_candles_1h and len(raw_candles_1h) >= 15:
-        sorted_1h_atr = sorted(raw_candles_1h, key=lambda c: float(c[0]))
-        atr_1h = _compute_atr(sorted_1h_atr, period=14)
+        atr_1h = _compute_atr(raw_candles_1h, period=14)
         if atr_1h is not None:
             atr_1h = round(atr_1h, 6)
 
     # 1h Volume Ratio (current / SMA 20)
     volume_ratio_1h: float | None = None
     if raw_candles_1h and len(raw_candles_1h) >= 21:
-        sorted_1h_vol = sorted(raw_candles_1h, key=lambda c: float(c[0]))
-        volume_ratio_1h = _compute_volume_ratio(sorted_1h_vol, lookback=20)
+        volume_ratio_1h = _compute_volume_ratio(raw_candles_1h, lookback=20)
 
     # 6h EMA(50) Trend Direction
     ema_trend_6h: bool | None = None
     if raw_candles_6h and len(raw_candles_6h) >= 50:
-        sorted_6h_ema = sorted(raw_candles_6h, key=lambda c: float(c[0]))
-        closes_6h_ema = [float(c[4]) for c in sorted_6h_ema if len(c) >= 5]
+        closes_6h_ema = [float(c[4]) for c in raw_candles_6h if len(c) >= 5]
         if len(closes_6h_ema) >= 50:
             ema_50 = _compute_ema(closes_6h_ema, 50)
             ema_trend_6h = closes_6h_ema[-1] > ema_50[-1]
@@ -430,6 +488,15 @@ def compute_features(
         "volume_ratio_1h": volume_ratio_1h,
         "ema_trend_6h": ema_trend_6h,
         "rs_vs_btc": round(rs_vs_btc, 4),
+        "rs_vs_btc_1h": rs_vs_btc_1h,
+        "rs_vs_btc_7d": rs_vs_btc_7d,
+        "rs_vs_btc_30d": rs_vs_btc_30d,
+        "rs_vs_btc_60d": rs_vs_btc_60d,
+        "ret_1h": ret_1h,
+        "ret_24h": ret_24h,
+        "ret_7d": ret_7d,
+        "ret_30d": ret_30d,
+        "ret_60d": ret_60d,
         "swing_shelf_7d": round(swing_shelf_7d, 6) if swing_shelf_7d is not None else None,
         "swing_high_7d": round(swing_high_7d, 6) if swing_high_7d is not None else None,
         "vol_7d_avg_usd": round(vol_7d_avg_usd, 2) if vol_7d_avg_usd is not None else None,

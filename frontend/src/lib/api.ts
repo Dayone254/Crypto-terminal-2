@@ -5,7 +5,7 @@
  * WebSocket scheme are defined in exactly one place.
  */
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 /** Derive the WS base from API_BASE so TLS deployments get wss:// automatically. */
 export function wsBase(): string {
@@ -33,6 +33,16 @@ export interface CandidateRow {
     last_price: number;
     day_change_pct: number;
     composite_score: number;
+    /**
+     * Belief state. `edge` is how good the evidence was, `coverage` is how much
+     * of the model that evidence actually spans, and `coverage_band` is the
+     * coarse label for it. A score without these cannot be read honestly: a 78
+     * ranked on three of six components is not the same setup as a 78 ranked on
+     * all six, and until these were carried through nothing could tell them apart.
+     */
+    edge?: number | null;
+    coverage?: number | null;
+    coverage_band?: string | null;
     trade_direction: string;
     label: string;
     pos_in_range: number;
@@ -87,15 +97,105 @@ export interface FeatureMetrics {
     swing_high_7d?: number;
 }
 
+/**
+ * The scorer's own arithmetic, as persisted alongside the score.
+ *
+ * `components` holds the *normalised* readings (all in [-1, 1]) that went into
+ * the weighted sum; the `*_interactions` fields are point adjustments applied on
+ * top of it. Carrying this through to the UI is what lets the page say *why* a
+ * score is what it is, instead of merely asserting that it is high.
+ */
+export interface ScoreBreakdown {
+    baseline?: number;
+    total?: number;
+    clamped?: number;
+    rank_key?: number;
+    edge?: number;
+    coverage?: number;
+    coverage_band?: string;
+    interactions?: number;
+    feature_interactions?: number;
+    macro_interactions?: number;
+    feature_version?: string;
+    components?: Record<string, number>;
+    /** Per weighted component: did a real observation back it, or was it absent? */
+    backed?: Record<string, boolean>;
+    funding_rate?: number | null;
+    oi_change_pct?: number | null;
+    tags?: string[];
+}
+
+/**
+ * Raw readings the scorer consumed, straight from the persisted feature vector.
+ * Every field is optional: older scores predate the flight recorder, and any
+ * input can legitimately be missing for a given symbol.
+ */
+export interface ScoreInputs {
+    rsi_1h?: number | null;
+    rsi_15m?: number | null;
+    rsi_6h?: number | null;
+    bb_width_1h?: number | null;
+    bb_pct_b_1h?: number | null;
+    volume_ratio_1h?: number | null;
+    macd_1h?: number | null;
+    atr_1h?: number | null;
+    ema_trend_6h?: boolean | null;
+    rs_vs_btc?: number | null;
+    rs_vs_btc_1h?: number | null;
+    rs_vs_btc_7d?: number | null;
+    ret_1h?: number | null;
+    ret_24h?: number | null;
+    ret_7d?: number | null;
+    l2_buy_vol_2pct?: number | null;
+    l2_sell_vol_2pct?: number | null;
+    funding_rate?: number | null;
+    oi_change_pct?: number | null;
+    day_change_pct?: number | null;
+    pos_in_range?: number | null;
+    quote_vol_24h?: number | null;
+    vwap_24h?: number | null;
+}
+
+/**
+ * Effective scoring config (yaml + persisted overrides).
+ *
+ * NOTE: `fetchScoringConfig` below returns `any` and is used by `ScoringEditor`,
+ * which reads a `components[key].points` shape the backend does not actually
+ * return — so that editor silently falls back to its defaults. This typed
+ * accessor is deliberately named differently rather than quietly re-pointing the
+ * existing one and changing the editor's behaviour as a side effect.
+ */
+export interface ScoringWeightsConfig {
+    baseline: number;
+    component_weights: { LONG: Record<string, number>; SHORT: Record<string, number> };
+    interaction_bonuses: { confluence_bonus: number; breakout_bonus: number };
+    counter_trend_penalty: number;
+    macro_beta_penalty: number;
+    macro_beta_full_at_pct: number;
+}
+
+export async function fetchScoringWeights(): Promise<ScoringWeightsConfig> {
+    const res = await apiFetch("/api/v1/config/scoring");
+    if (!res.ok) throw new Error(`Scoring config fetch failed: ${res.status}`);
+    return res.json();
+}
+
 export interface CandidateDrawerPayload {
     product_id: string;
     composite_score: number;
+    /** Belief state — see `ScoreBreakdown` for where these come from. */
+    edge?: number | null;
+    coverage?: number | null;
+    coverage_band?: string | null;
     trade_direction?: string;
     label: string;
     ladder: LadderLevels | null;
     features?: FeatureMetrics | null;
     copy_text: string | null;
-    score_breakdown?: any;
+    /** The scorer's own arithmetic: normalised components + which interactions fired. */
+    score_breakdown?: ScoreBreakdown;
+    /** Raw readings the scorer consumed, from the persisted feature vector. */
+    inputs?: ScoreInputs | null;
     updated_at: string;
     options_flow?: OptionsFlow | Record<string, never> | null;
 }
@@ -247,3 +347,144 @@ export async function dismissAlert(alertId: string): Promise<{ alert_id: string;
     if (!res.ok) throw new Error(`Dismiss alert failed: ${res.status}`);
     return res.json();
 }
+
+// ── Research & Walk-Forward Backtest Endpoints ─────────────────────────────────
+
+export interface SymbolListingBound {
+    first_candle_ts: number;
+    last_candle_ts: number;
+    total_candles: number;
+}
+
+export interface ResearchSummaryResponse {
+    historical_symbols_count: number;
+    total_candles_stored: number;
+    symbol_listing_bounds: Record<string, SymbolListingBound>;
+    staged_shadow_pipelines: ShadowPipeline[];
+    min_shadow_sample_size: number;
+    survivorship_bias_note: string;
+}
+
+export interface WindowPerformance {
+    window_index: number;
+    train_start_ts: number;
+    train_end_ts: number;
+    test_start_ts: number;
+    test_end_ts: number;
+    trades_count: number;
+    win_rate: number;
+    avg_r: number;
+    max_drawdown_pct: number;
+    l2_approximated: boolean;
+}
+
+export interface WalkForwardCandidateResult {
+    candidate_name: string;
+    overall_win_rate: number;
+    overall_avg_r: number;
+    overall_trades_count: number;
+    consistency_score: number;
+    window_results: WindowPerformance[];
+    l2_approximated: boolean;
+    survivorship_bias_note: string;
+}
+
+export interface ShadowPipeline {
+    pipeline_version: string;
+    candidate_name: string;
+    staged_at: string;
+    sample_count: number;
+    target_sample_size: number;
+    status: "STAGED" | "ELIGIBLE" | "PROMOTED" | "DISCARDED";
+    eligible_for_promotion: boolean;
+    win_rate: number;
+    promoted_at?: string | null;
+}
+
+export async function fetchResearchSummary(): Promise<ResearchSummaryResponse> {
+    const res = await apiFetch("/api/v1/research/summary");
+    if (!res.ok) throw new Error(`Research summary fetch failed: ${res.status}`);
+    return res.json();
+}
+
+export async function expandHistory(symbols: string[], years = 5.0): Promise<any> {
+    const res = await apiFetch("/api/v1/research/expand-history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols, years }),
+    });
+    if (!res.ok) throw new Error(`Expand history failed: ${res.status}`);
+    return res.json();
+}
+
+export interface StrategyPlugin {
+    strategy_id: string;
+    name: string;
+    description: string;
+    author: string;
+    version: string;
+}
+
+export async function fetchPluggableStrategies(): Promise<{ strategies: StrategyPlugin[]; count: number }> {
+    const res = await apiFetch("/api/v1/research/strategies");
+    if (!res.ok) throw new Error(`Fetch strategies failed: ${res.status}`);
+    return res.json();
+}
+
+/**
+ * Execute walk-forward backtest research run for candidate strategy validation.
+ */
+export async function runWalkForwardBacktest(symbols?: string[], strategyId?: string): Promise<{
+    candidate_rankings: WalkForwardCandidateResult[];
+    symbols_evaluated: string[];
+    l2_approximated: boolean;
+    survivorship_bias_note: string;
+}> {
+    const params = new URLSearchParams();
+    if (symbols && symbols.length) {
+        symbols.forEach((s) => params.append("symbols", s));
+    }
+    if (strategyId) {
+        params.append("strategy_id", strategyId);
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const res = await apiFetch(`/api/v1/research/run-backtest${query}`, { method: "POST" });
+    if (!res.ok) throw new Error(`Run backtest failed: ${res.status}`);
+    return res.json();
+}
+
+export async function fetchShadowPipelines(): Promise<{
+    pipelines: ShadowPipeline[];
+    min_shadow_sample_size: number;
+}> {
+    const res = await apiFetch("/api/v1/research/shadow");
+    if (!res.ok) throw new Error(`Fetch shadow pipelines failed: ${res.status}`);
+    return res.json();
+}
+
+export async function stageCandidateStrategy(candidateName: string, minScore = 60.0): Promise<any> {
+    const res = await apiFetch("/api/v1/research/shadow/stage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_name: candidateName, min_composite_score: minScore }),
+    });
+    if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ detail: "Stage failed" }));
+        throw new Error(errJson.detail || `Stage candidate strategy failed: ${res.status}`);
+    }
+    return res.json();
+}
+
+export async function promoteShadowPipeline(pipelineVersion: string): Promise<any> {
+    const res = await apiFetch("/api/v1/research/shadow/promote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pipeline_version: pipelineVersion, confirm: true }),
+    });
+    if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ detail: "Promotion failed" }));
+        throw new Error(errJson.detail || `Promote shadow pipeline failed: ${res.status}`);
+    }
+    return res.json();
+}
+

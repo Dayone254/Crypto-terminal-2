@@ -1,19 +1,46 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
-import { CandidateDrawerPayload, CandidateRow, HistoricalSetup, fetchCandidates, fetchMarketLadder, fetchMarketTradeHistory, pinSymbol, unpinSymbol } from "@/lib/api";
+import {
+    CandidateDrawerPayload,
+    CandidateRow,
+    HistoricalSetup,
+    ScoringWeightsConfig,
+    fetchCandidates,
+    fetchMarketLadder,
+    fetchMarketTradeHistory,
+    fetchScoringWeights,
+    pinSymbol,
+    unpinSymbol,
+} from "@/lib/api";
 import { LimitLadderOverlay } from "@/components/LimitLadderOverlay";
 import { SetupCalculator } from "@/components/SetupCalculator";
 import { TradeReasoningCard } from "@/components/TradeReasoningCard";
+import { ScoreBreakdownPanel } from "@/components/ScoreBreakdown";
+import { CoverageBadge, coverageOpacity } from "@/components/CoverageBadge";
+import { EmptyState, Panel, SectionTitle, Skeleton } from "@/components/ui";
 import { Level2Depth } from "@/components/Level2Depth";
 import { NairobiClock } from "@/components/NairobiClock";
 import { CompareModal } from "@/components/CompareModal";
+import { TopScannedAssetsTable } from "@/components/TopScannedAssetsTable";
+import { SetupSummaryRail } from "@/components/SetupSummaryRail";
+import { ScoreExplanationModal } from "@/components/ScoreExplanationModal";
+import { DeepAnalyticalToolsDrawer } from "@/components/DeepAnalyticalToolsDrawer";
 
-const NativeChart = dynamic(() => import("@/components/NativeChart").then(mod => mod.NativeChart), { ssr: false });
-import { ArrowLeft, Check, Copy, Layers, ShieldAlert, Star, Target, Zap, ArrowRightLeft, Activity } from "lucide-react";
+const NativeChart = dynamic(
+    () => import("@/components/NativeChart").then((mod) => mod.NativeChart || mod.default),
+    {
+        ssr: false,
+        loading: () => <Skeleton height="740px" />,
+    }
+);
+import { Activity, AlertTriangle, ArrowLeft, ArrowRightLeft, Check, ChevronDown, ChevronUp, Copy, Layers, Star, Target } from "lucide-react";
+
+/** The scheduler runs every 300s, so anything past this is worth flagging. */
+const STALE_MINUTES = 15;
 
 export default function MarketDetailPage() {
     const params = useParams();
@@ -21,49 +48,135 @@ export default function MarketDetailPage() {
     const symbol = decodeURIComponent(rawSymbol).toUpperCase();
 
     const [candidate, setCandidate] = useState<CandidateRow | null>(null);
+    const [candidates, setCandidates] = useState<CandidateRow[]>([]);
     const [payload, setPayload] = useState<CandidateDrawerPayload | null>(null);
     const [tradeHistory, setTradeHistory] = useState<HistoricalSetup[]>([]);
+    const [scoring, setScoring] = useState<ScoringWeightsConfig | null>(null);
     const [loading, setLoading] = useState(true);
+    const [notInScan, setNotInScan] = useState(false);
     const [pinned, setPinned] = useState(false);
     const [copied, setCopied] = useState(false);
     const [toast, setToast] = useState<string | null>(null);
     const [showCompare, setShowCompare] = useState(false);
+    const [showScoreExplanation, setShowScoreExplanation] = useState(false);
+    const [showSecondaryTools, setShowSecondaryTools] = useState(false);
+    const [now, setNow] = useState<number | null>(null);
 
     useEffect(() => {
-        setLoading(true);
-        fetchCandidates()
-            .then((list) => {
+        let cancelled = false;
+        let isInitial = true;
+
+        // Load scoring weights ONCE on mount — they don't change per page visit.
+        fetchScoringWeights()
+            .then((cfg) => { if (!cancelled && cfg) setScoring(cfg); })
+            .catch(() => { });
+
+        // 1. Single-Asset Data: ladder + trade history (fast DB reads, server-cached 30s).
+        const loadSingleAssetData = async () => {
+            if (isInitial) {
+                setLoading(true);
+                setNotInScan(false);
+            }
+
+            try {
+                const [ladderData, tradeHist] = await Promise.all([
+                    fetchMarketLadder(symbol).catch((err) => { console.error("Error fetching ladder detail:", err); return null; }),
+                    fetchMarketTradeHistory(symbol).catch((err) => { console.error("Error fetching trade history:", err); return null; }),
+                ]);
+
+                if (cancelled) return;
+
+                if (ladderData) {
+                    setPayload(ladderData);
+                    if (ladderData.features) {
+                        const builtCandidate: CandidateRow = {
+                            product_id: symbol,
+                            last_price: ladderData.features.last_price || 0,
+                            day_change_pct: 0,
+                            quote_vol_24h: 0,
+                            composite_score: ladderData.composite_score || 0,
+                            label: ladderData.label || "NEUTRAL",
+                            trade_direction: ladderData.trade_direction || "LONG",
+                            coverage: ladderData.coverage || null,
+                            coverage_band: ladderData.coverage_band || null,
+                            edge: ladderData.edge || null,
+                            pos_in_range: 0.5,
+                            tags: [],
+                            pinned: false,
+                            ladder: ladderData.ladder || null,
+                        };
+                        setCandidate((prev) => prev || builtCandidate);
+                    }
+                    setNotInScan(false);
+                } else if (!ladderData && isInitial) {
+                    setNotInScan(true);
+                }
+
+                if (tradeHist) setTradeHistory(tradeHist);
+            } finally {
+                if (isInitial && !cancelled) {
+                    setLoading(false);
+                    isInitial = false;
+                }
+            }
+        };
+
+        // 2. Global candidates list — background, infrequent (60s poll).
+        const loadGlobalCandidates = async () => {
+            try {
+                const list = await fetchCandidates().catch((err) => {
+                    console.error("Error fetching global candidates list:", err);
+                    return null;
+                });
+                if (cancelled || !list) return;
+
+                setCandidates(list);
                 const found = list.find((c) => c.product_id.toLowerCase() === symbol.toLowerCase());
                 if (found) {
                     setCandidate(found);
                     setPinned(found.pinned);
-                } else {
-                    setCandidate({
-                        product_id: symbol,
-                        last_price: 1.0,
-                        day_change_pct: 0,
-                        composite_score: 75,
-                        trade_direction: "LONG",
-                        label: "ENTRY_ZONE",
-                        pos_in_range: 0.25,
-                        quote_vol_24h: 5000000,
-                        ladder: null,
-                        tags: ["VWAP_HOLD", "FIB_786"],
-                        pinned: false,
-                    });
+                    setNotInScan(false);
                 }
-            })
-            .catch((err) => console.error("Error fetching candidate:", err));
+            } catch (err) {
+                console.error("Background candidates fetch error:", err);
+            }
+        };
 
-        fetchMarketLadder(symbol)
-            .then((data) => setPayload(data))
-            .catch((err) => console.error("Error fetching ladder detail:", err))
-            .finally(() => setLoading(false));
+        loadSingleAssetData();
+        loadGlobalCandidates();
 
-        fetchMarketTradeHistory(symbol)
-            .then((hist) => setTradeHistory(hist))
-            .catch((err) => console.error("Error fetching trade history:", err));
+        // Poll asset detail every 20s (server cache is 30s, so this is light).
+        const singleAssetInterval = setInterval(loadSingleAssetData, 20000);
+        // Poll full candidates list every 60s — rarely changes between scans.
+        const globalListInterval = setInterval(loadGlobalCandidates, 60000);
+
+        return () => {
+            cancelled = true;
+            clearInterval(singleAssetInterval);
+            clearInterval(globalListInterval);
+        };
     }, [symbol]);
+
+    useEffect(() => {
+        setNow(Date.now());
+        const id = setInterval(() => setNow(Date.now()), 5_000);
+        return () => clearInterval(id);
+    }, []);
+
+    const rank = useMemo(() => {
+        if (!candidate || candidates.length === 0) return null;
+        const sorted = [...candidates].sort((a, b) => b.composite_score - a.composite_score);
+        const idx = sorted.findIndex((c) => c.product_id === candidate.product_id);
+        return idx >= 0 ? { position: idx + 1, total: sorted.length } : null;
+    }, [candidate, candidates]);
+
+    const ageMinutes = useMemo(() => {
+        if (now === null || !payload?.updated_at) return null;
+        const t = Date.parse(payload.updated_at);
+        return Number.isNaN(t) ? null : Math.max(0, Math.floor((now - t) / 60_000));
+    }, [now, payload?.updated_at]);
+
+    const isStale = ageMinutes !== null && ageMinutes >= STALE_MINUTES;
 
     const float_to_str = (n: number) => n < 1 ? n.toFixed(4) : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 
@@ -98,330 +211,307 @@ export default function MarketDetailPage() {
     };
 
     const formatPrice = (v: number | null | undefined): string => {
-        if (v === null || v === undefined) return "-";
+        if (v === null || v === undefined) return "—";
         if (v < 0.0001) return `$${v.toFixed(6)}`;
-        if (v < 1.0) return `$${v.toFixed(5)}`;
+        if (v < 1.0) return `$${v.toFixed(4)}`;
         if (v < 10.0) return `$${v.toFixed(3)}`;
         return `$${v.toFixed(2)}`;
     };
 
-    const lad = payload?.ladder || candidate?.ladder;
-    const lastP = candidate?.last_price || 1.0;
+    const lad = payload?.ladder || candidate?.ladder || null;
+    const lastP = candidate?.last_price ?? payload?.features?.last_price ?? null;
 
     const isShortMath = !!(lad?.stop_price && lad?.tranche_a_price && lad.stop_price > lad.tranche_a_price);
     const effectiveTradeDir = isShortMath ? "SHORT" : (payload?.trade_direction || candidate?.trade_direction || "LONG");
 
+    const coverage = payload?.coverage ?? candidate?.coverage ?? null;
+    const coverageBand = payload?.coverage_band ?? candidate?.coverage_band ?? null;
+    const edge = payload?.edge ?? candidate?.edge ?? null;
+
+    const coldLoad = loading && !candidate && !payload;
+
+    const symbolBase = symbol.split("-")[0];
+    const assetFullName = symbolBase === "ICP" ? "Internet Computer" : (symbolBase === "BTC" ? "Bitcoin" : (symbolBase === "ETH" ? "Ethereum" : `${symbolBase} Token`));
+
     return (
-        <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-dark)", color: "var(--text-main)", padding: "1.25rem 2rem", display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-            {/* Toast Notification Banner */}
+        <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-dark)", color: "var(--text-main)", padding: "1rem 1.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
             {toast && <div className="toast">{toast}</div>}
 
-            {/* Top Navigation & Status Bar */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "none", paddingBottom: "0.85rem" }}>
+            {/* 1. Top Navigation & System Status Bar */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
                 <Link
                     href="/"
                     style={{
                         display: "inline-flex",
                         alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.75rem",
+                        gap: "0.4rem",
+                        fontSize: "0.72rem",
                         fontWeight: 800,
                         color: "var(--text-muted)",
-                        background: "var(--panel-bg)",
-                        padding: "0.4rem 0.85rem",
-                        borderRadius: 0,
-                        border: "none",
+                        background: "rgba(255,255,255,0.03)",
+                        padding: "0.35rem 0.75rem",
+                        borderRadius: "3px",
+                        border: "1px solid rgba(255,255,255,0.06)",
                         textDecoration: "none",
+                        letterSpacing: "0.04em",
                     }}
                 >
-                    <ArrowLeft size={16} />
-                    BACK TO MARKET SCANNER DESK
+                    <ArrowLeft size={14} />
+                    SCANNER
                 </Link>
 
-                <div className="mono" style={{ fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "0.6rem", background: "var(--panel-bg)", padding: "0.4rem 0.85rem", borderRadius: 0, border: "none", color: "var(--text-muted)" }}>
-                    <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: "var(--accent-emerald)" }} className="status-pulse" />
-                    NAIROBI: <NairobiClock />
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem", fontSize: "0.72rem", fontFamily: "var(--font-jetbrains)" }}>
+                    <div style={{ color: "var(--warn)", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                        <AlertTriangle size={13} color="var(--warn)" />
+                        Levels computed {ageMinutes != null ? `${ageMinutes}m` : "recently"} ago · Scanner active
+                    </div>
+
+                    <div style={{ color: "var(--pos)", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                        <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--pos)" }} className="status-pulse" />
+                        LIVE
+                    </div>
+
+                    <div style={{ color: "var(--text-dim)" }}>
+                        <NairobiClock />
+                    </div>
                 </div>
             </div>
 
-            {/* COMPACT Candidate Header Summary Ribbon */}
-            <div style={{ background: "var(--panel-bg)", border: "none", borderRadius: 0, padding: "0.6rem 1rem", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
-                    <button
-                        onClick={handlePinToggle}
-                        style={{
-                            padding: "0.4rem",
-                            borderRadius: 0,
-                            border: pinned ? "1px solid rgba(245, 158, 11, 0.4)" : "1px solid var(--panel-border)",
-                            background: pinned ? "rgba(245, 158, 11, 0.15)" : "rgba(0,0,0,0.4)",
-                            color: pinned ? "#F59E0B" : "var(--text-dim)",
-                            cursor: "pointer",
-                            display: "flex",
-                            alignItems: "center"
-                        }}
-                        title={pinned ? "Unpin Watchlist" : "Pin Watchlist"}
-                    >
-                        <Star size={16} fill={pinned ? "#F59E0B" : "none"} />
-                    </button>
+            {/* Staleness Warning Banners */}
+            {isStale && !coldLoad && (
+                <EmptyState icon={<AlertTriangle size={14} color="var(--warn)" style={{ flexShrink: 0, marginTop: "1px" }} />}>
+                    These levels were computed <strong>{ageMinutes} minutes ago</strong> and the scanner re-runs every 5.
+                    Treat the ladder as indicative until the next scan completes.
+                </EmptyState>
+            )}
 
-                    <h1 style={{ fontSize: "1.2rem", fontWeight: 800, color: "#FFF", margin: 0, letterSpacing: "-0.02em" }}>{symbol}</h1>
+            {notInScan && !coldLoad && (
+                <EmptyState icon={<AlertTriangle size={14} color="var(--warn)" style={{ flexShrink: 0, marginTop: "1px" }} />}>
+                    <strong>{symbol}</strong> was not in the latest scan, so there is no score, label or ladder for it.
+                </EmptyState>
+            )}
 
-                    {candidate && <span className={`label-badge ${candidate.label}`} style={{ padding: "0.25rem 0.5rem", fontSize: "0.65rem" }}>{candidate.label}</span>}
-                    {candidate && (
-                        <span className={`label-badge`} style={{ padding: "0.25rem 0.5rem", fontSize: "0.65rem", background: effectiveTradeDir === "SHORT" ? "rgba(244, 63, 94, 0.2)" : "rgba(16, 185, 129, 0.2)", color: effectiveTradeDir === "SHORT" ? "#F43F5E" : "#10B981" }}>
-                            {effectiveTradeDir}
-                        </span>
-                    )}
-
-                    <span className="mono" style={{ color: "var(--text-main)", fontSize: "0.8rem", fontWeight: 700 }}>
-                        SPOT: {formatPrice(candidate?.last_price)}
-                    </span>
-
-                    {candidate && (
-                        <>
-                            <span style={{ color: "var(--panel-border)" }}>|</span>
-                            <span className="mono" style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                                24h Vol: ${(candidate.quote_vol_24h / 1_000_000).toFixed(2)}M
-                            </span>
-                            <span style={{ color: "var(--panel-border)" }}>|</span>
-                            <span className="mono" style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                                PIR: {candidate.pos_in_range.toFixed(2)}
-                            </span>
-                        </>
-                    )}
+            {coldLoad ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
+                    <Skeleton height="3.5rem" />
+                    <Skeleton height="40rem" />
                 </div>
-
-                {/* Score, 24h Change & Actions in compact format */}
-                {candidate && (
-                    <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem" }}>
-                            <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", fontWeight: 800, textTransform: "uppercase" }}>SCORE:</span>
-                            <span className="mono" style={{ fontSize: "1.1rem", fontWeight: 800, color: "var(--accent-emerald)" }}>
-                                {candidate.composite_score.toFixed(0)}<span style={{ fontSize: "0.7rem", color: "var(--text-dim)", fontWeight: 400 }}>/100</span>
-                            </span>
-                        </div>
-
-                        <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem", paddingLeft: "1rem", borderLeft: "none" }}>
-                            <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", fontWeight: 800, textTransform: "uppercase" }}>24H:</span>
-                            <span className="mono" style={{ fontSize: "1rem", fontWeight: 800, color: candidate.day_change_pct >= 0 ? "var(--accent-emerald)" : "var(--accent-rose)" }}>
-                                {candidate.day_change_pct >= 0 ? `+${candidate.day_change_pct.toFixed(2)}%` : `${candidate.day_change_pct.toFixed(2)}%`}
-                            </span>
-                        </div>
-
-                        {payload?.score_breakdown?.funding_rate !== undefined && (
-                            <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem", paddingLeft: "1rem", borderLeft: "none" }}>
-                                <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", fontWeight: 800, textTransform: "uppercase" }}>FUNDING:</span>
-                                <span className="mono" style={{ fontSize: "0.9rem", fontWeight: 800, color: payload.score_breakdown.funding_rate < -0.0001 ? "var(--accent-emerald)" : "var(--text-main)" }}>
-                                    {(payload.score_breakdown.funding_rate * 100).toFixed(4)}%
-                                </span>
-                            </div>
-                        )}
-
-                        {payload?.score_breakdown?.oi_change_pct !== undefined && payload.score_breakdown.oi_change_pct !== 0 && (
-                            <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem", paddingLeft: "1rem", borderLeft: "none" }}>
-                                <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", fontWeight: 800, textTransform: "uppercase" }}>OI:</span>
-                                <span className="mono" style={{ fontSize: "0.9rem", fontWeight: 800, color: payload.score_breakdown.oi_change_pct >= 0 ? "var(--accent-emerald)" : "var(--accent-rose)" }}>
-                                    {payload.score_breakdown.oi_change_pct > 0 ? `+${payload.score_breakdown.oi_change_pct.toFixed(2)}%` : `${payload.score_breakdown.oi_change_pct.toFixed(2)}%`}
-                                </span>
-                            </div>
-                        )}
-
-                        {payload?.copy_text && (
+            ) : (
+                <>
+                    {/* 2. HORIZONTAL TERMINAL MARKET HEADER STRIP */}
+                    <div style={{
+                        background: "var(--panel-bg)",
+                        border: "1px solid rgba(255, 255, 255, 0.08)",
+                        borderRadius: "4px",
+                        padding: "0.75rem 1.25rem",
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "1.25rem",
+                    }}>
+                        {/* Asset Identity */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.85rem" }}>
                             <button
-                                onClick={handleCopyLadder}
-                                className="mono"
+                                onClick={handlePinToggle}
+                                disabled={!candidate}
                                 style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "0.4rem",
-                                    fontSize: "0.75rem",
-                                    fontWeight: 800,
-                                    padding: "0.4rem 0.8rem",
-                                    borderRadius: 0,
-                                    border: copied ? "1px solid #10B981" : "1px solid rgba(6, 182, 212, 0.4)",
-                                    background: copied ? "#10B981" : "rgba(6, 182, 212, 0.15)",
-                                    color: copied ? "#000" : "var(--accent-cyan)",
-                                    cursor: "pointer",
-                                    transition: "all 0.15s ease",
-                                    marginLeft: "0.5rem"
+                                    background: "none", border: "none", padding: 0, cursor: candidate ? "pointer" : "default"
                                 }}
                             >
-                                {copied ? <Check size={14} /> : <Copy size={14} />}
-                                {copied ? "COPIED!" : "COPY LADDER"}
+                                <Star size={18} fill={pinned ? "var(--warn)" : "none"} color={pinned ? "var(--warn)" : "var(--text-dim)"} />
                             </button>
-                        )}
 
-                        {candidate && (
-                            <button
-                                onClick={() => setShowCompare(true)}
-                                className="mono"
-                                style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "0.4rem",
+                            <div style={{
+                                width: "36px", height: "36px", borderRadius: "50%",
+                                background: "rgba(6, 182, 212, 0.15)", border: "1px solid rgba(6, 182, 212, 0.4)",
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                fontSize: "1rem", fontWeight: 900, color: "var(--info)"
+                            }}>
+                                {symbolBase.slice(0, 1)}
+                            </div>
+
+                            <div>
+                                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                    <h1 style={{ fontSize: "1.25rem", fontWeight: 900, color: "var(--text-strong)", margin: 0, letterSpacing: "-0.02em" }}>{symbol}</h1>
+                                </div>
+                                <div style={{ fontSize: "0.72rem", color: "var(--text-4)", fontWeight: 500 }}>
+                                    {assetFullName}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Price & 24h Change */}
+                        <div>
+                            <div style={{ fontSize: "1.3rem", fontWeight: 900, color: "var(--text-strong)", fontFamily: "var(--font-jetbrains)" }}>
+                                {formatPrice(lastP)}
+                            </div>
+                            <div style={{ fontSize: "0.75rem", fontWeight: 800, color: (candidate?.day_change_pct ?? 0) >= 0 ? "var(--pos)" : "var(--neg-bright)", fontFamily: "var(--font-jetbrains)" }}>
+                                {candidate?.day_change_pct != null ? `${candidate.day_change_pct >= 0 ? "+" : ""}${candidate.day_change_pct.toFixed(2)}%` : "—"} (24h)
+                            </div>
+                        </div>
+
+                        {/* Direction & Status Badges */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                            <div style={{
+                                padding: "0.35rem 0.8rem",
+                                borderRadius: "3px",
+                                fontSize: "0.8rem",
+                                fontWeight: 900,
+                                background: effectiveTradeDir === "SHORT" ? "rgba(244, 63, 94, 0.2)" : "rgba(16, 185, 129, 0.2)",
+                                color: effectiveTradeDir === "SHORT" ? "var(--neg-bright)" : "var(--pos)",
+                                border: effectiveTradeDir === "SHORT" ? "1px solid rgba(244, 63, 94, 0.4)" : "1px solid rgba(16, 185, 129, 0.4)",
+                                letterSpacing: "0.05em"
+                            }}>
+                                {effectiveTradeDir}
+                            </div>
+
+                            {candidate?.label && (
+                                <div style={{
+                                    padding: "0.35rem 0.75rem",
+                                    borderRadius: "3px",
                                     fontSize: "0.75rem",
                                     fontWeight: 800,
-                                    padding: "0.4rem 0.8rem",
-                                    borderRadius: 0,
-                                    border: "none",
-                                    background: "rgba(168, 85, 247, 0.15)",
-                                    color: "#C084FC",
-                                    cursor: "pointer",
-                                    transition: "all 0.15s ease",
-                                    marginLeft: "0.2rem"
-                                }}
-                            >
-                                <ArrowRightLeft size={14} />
-                                COMPARE
-                            </button>
-                        )}
-                    </div>
-                )}
-            </div>
-
-            {/* DOMINANT HERO CHART CANVAS WITH FLOATING ENTRY & TARGET ZONES HUD */}
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-                {/* Floating Entry & Target Zones HUD Bar */}
-                <div style={{ background: "#05070D", border: "none", borderRadius: 0, padding: "0.6rem 1rem", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "0.75rem" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <Layers size={16} color="var(--accent-cyan)" />
-                        <span style={{ fontWeight: 800, fontSize: "0.75rem", color: "#FFF", letterSpacing: "0.04em" }}>ACTIVE SETUP LEVEL ZONES:</span>
-                    </div>
-
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
-                        {/* Tranche A Zone */}
-                        <div className="mono" style={{ background: "rgba(16, 185, 129, 0.12)", border: "none", borderRadius: 0, padding: "0.3rem 0.6rem", display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem" }}>
-                            <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#34D399" }} />
-                            <span style={{ color: "var(--text-muted)" }}>TRANCHE A (60%):</span>
-                            <span style={{ color: "#34D399", fontWeight: 800 }}>{formatPrice(lad?.tranche_a_price || lastP * 0.99)}</span>
+                                    background: "rgba(255, 255, 255, 0.05)",
+                                    color: "var(--text-main)",
+                                    border: "1px solid rgba(255, 255, 255, 0.1)"
+                                }}>
+                                    {candidate.label}
+                                </div>
+                            )}
                         </div>
 
-                        {/* Tranche B Zone */}
-                        <div className="mono" style={{ background: "rgba(6, 182, 212, 0.12)", border: "none", borderRadius: 0, padding: "0.3rem 0.6rem", display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem" }}>
-                            <span style={{ width: "6px", height: "6px", borderRadius: 0, background: "#38BDF8" }} />
-                            <span style={{ color: "var(--text-muted)" }}>TRANCHE B (40%):</span>
-                            <span style={{ color: "#38BDF8", fontWeight: 800 }}>{formatPrice(lad?.tranche_b_price || lastP * 0.97)}</span>
-                        </div>
-
-                        {/* Stop Loss Zone */}
-                        <div className="mono" style={{ background: "rgba(244, 63, 94, 0.12)", border: "none", borderRadius: 0, padding: "0.3rem 0.6rem", display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem" }}>
-                            <ShieldAlert size={12} color="#F87171" />
-                            <span style={{ color: "var(--text-muted)" }}>STOP LOSS:</span>
-                            <span style={{ color: "#F87171", fontWeight: 800 }}>{formatPrice(lad?.stop_price || lastP * 0.95)}</span>
-                        </div>
-
-                        {/* Target 1 Zone */}
-                        <div className="mono" style={{ background: "rgba(59, 130, 246, 0.12)", border: "none", borderRadius: 0, padding: "0.3rem 0.6rem", display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem" }}>
-                            <Target size={12} color="#60A5FA" />
-                            <span style={{ color: "var(--text-muted)" }}>TARGET 1:</span>
-                            <span style={{ color: "#60A5FA", fontWeight: 800 }}>{formatPrice(lad?.target_1_price || lastP * 1.05)}</span>
-                        </div>
-
-                        {/* Target 2 Zone */}
-                        <div className="mono" style={{ background: "rgba(168, 85, 247, 0.12)", border: "none", borderRadius: 0, padding: "0.3rem 0.6rem", display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem" }}>
-                            <Zap size={12} color="#C084FC" />
-                            <span style={{ color: "var(--text-muted)" }}>TARGET 2:</span>
-                            <span style={{ color: "#C084FC", fontWeight: 800 }}>{formatPrice(lad?.target_2_price || lastP * 1.10)}</span>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Dominant Native Chart Container (650px canvas height) */}
-                <NativeChart
-                    productId={symbol}
-                    height="650px"
-                    entryLevel={lad?.tranche_a_price}
-                    tpLevel={lad?.target_1_price}
-                    slLevel={lad?.stop_price}
-                    ladder={lad || null}
-                    features={payload?.features || null}
-                    tradeHistory={tradeHistory}
-                    tradeDirection={effectiveTradeDir}
-                />
-            </div>
-
-            {/* 4-COLUMN STRUCTURED DATA GRID BELOW CHART */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.5fr 1fr", gap: "1.25rem" }}>
-                {/* Column 1: Order Sizing & Risk/Reward Calculator Desk */}
-                <SetupCalculator
-                    symbol={symbol}
-                    lastPrice={candidate?.last_price || 1.0}
-                    ladder={lad || null}
-                />
-
-                {/* Column 2: Limit Ladder Target Matrix */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <Target size={18} color="var(--accent-emerald)" />
-                        <h3 style={{ fontSize: "0.85rem", fontWeight: 800, color: "#FFF", letterSpacing: "0.03em" }}>
-                            LIMIT LADDER TARGET MATRIX
-                        </h3>
-                    </div>
-                    {lad ? (
-                        <LimitLadderOverlay ladder={lad} lastPrice={candidate?.last_price || 1.0} />
-                    ) : (
-                        <div style={{ padding: "2rem", background: "#0B0F19", borderRadius: 0, border: "none", textAlign: "center", fontSize: "0.75rem", color: "var(--text-dim)" }}>
-                            Computing order targets...
-                        </div>
-                    )}
-                </div>
-
-                {/* Column 3: Structured Trade Thesis & Formatted Order Block */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                    {payload?.options_flow && payload.options_flow.gamma_walls && (
-                        <div style={{ background: "#0B0F19", border: "none", padding: "1rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                <Activity size={16} color="#A855F7" />
-                                <span style={{ fontSize: "0.72rem", fontWeight: 800, color: "#A855F7", textTransform: "uppercase", letterSpacing: "0.04em" }}>Options Gamma Engine</span>
+                        {/* Market Metrics Strip */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "1.5rem", fontFamily: "var(--font-jetbrains)", fontSize: "0.75rem" }}>
+                            <div>
+                                <div style={{ fontSize: "0.62rem", color: "var(--text-4)", fontWeight: 800, textTransform: "uppercase" }}>24H VOL</div>
+                                <div style={{ color: "var(--text-main)", fontWeight: 800 }}>
+                                    {candidate?.quote_vol_24h != null ? `$${(candidate.quote_vol_24h / 1e6).toFixed(2)}M` : "—"}
+                                </div>
                             </div>
-                            <div className="mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px dashed rgba(255,255,255,0.05)", paddingBottom: "0.4rem", marginBottom: "0.4rem" }}>
-                                    <span>NET DEALER GEX:</span>
-                                    <span style={{ color: payload.options_flow.total_net_gex >= 0 ? "#10B981" : "#F87171", fontWeight: 800 }}>
-                                        {payload.options_flow.total_net_gex >= 0 ? "+" : ""}{(payload.options_flow.total_net_gex / 1_000_000).toFixed(2)}M
-                                    </span>
-                                </div>
 
-                                <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px dashed rgba(255,255,255,0.05)", paddingBottom: "0.4rem", marginBottom: "0.4rem" }}>
-                                    <span>GAMMA FLIP:</span>
-                                    <span style={{ color: "#FFF", fontWeight: 800 }}>${payload.options_flow.gamma_flip.toLocaleString()}</span>
-                                </div>
-
-                                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-                                    {payload.options_flow.gamma_walls.slice(0, 3).map((w: any, idx: number) => (
-                                        <div key={idx} style={{ display: "flex", justifyContent: "space-between" }}>
-                                            <span>STRIKE ${float_to_str(w.strike)} {w.type == "RESISTANCE" ? "(CALL WALL)" : "(PUT WALL)"}</span>
-                                            <span style={{ color: w.type === "RESISTANCE" ? "#F43F5E" : "#10B981", fontWeight: 800, fontSize: "0.65rem" }}>{w.type}</span>
+                            <div>
+                                <div style={{ fontSize: "0.62rem", color: "var(--text-4)", fontWeight: 800, textTransform: "uppercase" }}>FUNDING</div>
+                                {(() => {
+                                    const fr = payload?.score_breakdown?.funding_rate ?? null;
+                                    return (
+                                        <div style={{ color: fr !== null ? (fr >= 0 ? "var(--pos)" : "var(--neg-bright)") : "var(--text-dim)", fontWeight: 800 }}>
+                                            {fr !== null ? `${fr >= 0 ? "+" : ""}${(fr * 100).toFixed(4)}%` : "—"}
                                         </div>
-                                    ))}
-                                </div>
+                                    );
+                                })()}
+                            </div>
+
+                            <div>
+                                <div style={{ fontSize: "0.62rem", color: "var(--text-4)", fontWeight: 800, textTransform: "uppercase" }}>OPEN INTEREST</div>
+                                {(() => {
+                                    const oi = payload?.score_breakdown?.oi_change_pct ?? null;
+                                    return (
+                                        <div style={{ color: oi !== null ? (oi >= 0 ? "var(--pos)" : "var(--neg-bright)") : "var(--text-dim)", fontWeight: 800 }}>
+                                            {oi !== null ? `${oi >= 0 ? "+" : ""}${oi.toFixed(2)}%` : "—"}
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         </div>
-                    )}
 
-                    {candidate && <TradeReasoningCard candidate={candidate} />}
-
-                    {payload?.copy_text && (
-                        <div style={{ background: "#0B0F19", border: "none", borderRadius: 0, padding: "1rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-                            <span style={{ fontSize: "0.65rem", color: "var(--text-dim)", fontWeight: 800, textTransform: "uppercase" }}>
-                                PRD §8 Formatted Order Template
-                            </span>
-                            <div className="code-block" style={{ margin: 0, fontSize: "0.72rem", overflowX: "auto" }}>
-                                {payload.copy_text}
+                        {/* SCANNER SCORE Container */}
+                        <div
+                            onClick={() => setShowScoreExplanation(true)}
+                            style={{
+                                background: "rgba(6, 182, 212, 0.08)",
+                                border: "1px solid rgba(6, 182, 212, 0.4)",
+                                borderRadius: "4px",
+                                padding: "0.4rem 1rem",
+                                display: "flex",
+                                flexDirection: "column",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                boxShadow: "0 0 15px rgba(6, 182, 212, 0.15)",
+                                cursor: "pointer",
+                                transition: "transform 0.1s ease",
+                            }}
+                            title="Click to view score composition"
+                        >
+                            <div style={{ fontSize: "0.6rem", fontWeight: 800, color: "var(--info)", letterSpacing: "0.08em" }}>
+                                SCANNER SCORE ⓘ
+                            </div>
+                            <div style={{ fontSize: "1.3rem", fontWeight: 900, color: "#ffffff", lineHeight: 1, fontFamily: "var(--font-jetbrains)" }}>
+                                {candidate?.composite_score != null ? candidate.composite_score.toFixed(0) : "—"} <span style={{ fontSize: "0.7rem", color: "var(--text-4)", fontWeight: 400 }}>/100</span>
                             </div>
                         </div>
-                    )}
-                </div>
 
-                {/* Column 4: L2 Orderbook Depth & Liquidity Stream */}
-                <Level2Depth symbol={symbol} />
-            </div>
+                        {/* RANK Container */}
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", fontFamily: "var(--font-jetbrains)" }}>
+                            <div style={{ fontSize: "0.62rem", color: "var(--text-4)", fontWeight: 800 }}>RANK</div>
+                            <div style={{ fontSize: "1.rem", fontWeight: 900, color: "var(--text-strong)" }}>
+                                {rank ? `#${rank.position}` : "—"} <span style={{ fontSize: "0.72rem", color: "var(--text-4)", fontWeight: 400 }}>{rank ? `/${rank.total}` : ""}</span>
+                            </div>
+                        </div>
+                    </div>
 
-            {/* Compare Modal Injection */}
+                    {/* 3. CENTRAL WORKSPACE GRID (CHART WORKSPACE + PERSISTENT SETUP SUMMARY RAIL) */}
+                    <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", alignItems: "flex-start" }}>
+                        {/* LEFT COLUMN: PRIMARY CHART WORKSPACE */}
+                        <div style={{ flex: 1, minWidth: "600px", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                            <NativeChart
+                                productId={symbol}
+                                height="740px"
+                                entryLevel={lad?.tranche_a_price}
+                                tpLevel={lad?.target_1_price}
+                                slLevel={lad?.stop_price}
+                                ladder={lad || null}
+                                features={payload?.features || null}
+                                optionsFlow={payload?.options_flow || null}
+                                tradeHistory={tradeHistory}
+                                tradeDirection={effectiveTradeDir}
+                            />
+                        </div>
+
+                        {/* RIGHT COLUMN: PERSISTENT SETUP SUMMARY RAIL */}
+                        <SetupSummaryRail
+                            candidate={candidate}
+                            payload={payload}
+                            symbol={symbol}
+                            effectiveTradeDir={effectiveTradeDir}
+                            rank={rank}
+                            onCompareClick={() => setShowCompare(true)}
+                            onScoreClick={() => setShowScoreExplanation(true)}
+                        />
+                    </div>
+
+                    {/* 4. BOTTOM SECTION: TOP SCANNED ASSETS TABLE */}
+                    <TopScannedAssetsTable
+                        candidates={candidates}
+                        currentSymbol={symbol}
+                    />
+
+                    {/* 5. DEEP ANALYTICAL TOOLS TABBED DRAWER */}
+                    <DeepAnalyticalToolsDrawer
+                        symbol={symbol}
+                        lastPrice={lastP ?? 0}
+                        ladder={lad}
+                        payload={payload}
+                        candidate={candidate}
+                        scoring={scoring}
+                        effectiveTradeDir={effectiveTradeDir}
+                        rank={rank}
+                    />
+                </>
+            )}
+
             {showCompare && candidate && (
                 <CompareModal
                     baseAsset={candidate}
                     onClose={() => setShowCompare(false)}
+                />
+            )}
+
+            {showScoreExplanation && (
+                <ScoreExplanationModal
+                    candidate={candidate}
+                    payload={payload}
+                    onClose={() => setShowScoreExplanation(false)}
                 />
             )}
         </div>

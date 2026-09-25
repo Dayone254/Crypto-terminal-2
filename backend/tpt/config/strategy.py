@@ -25,6 +25,10 @@ STRATEGY_PATH = Path(__file__).parent.parent.parent.parent / "config" / "strateg
 class InteractionBonuses(BaseModel):
     confluence_bonus: float = 10.0
     breakout_bonus: float = 8.0
+    # Awarded when BB squeeze + volume surge + 1h RS or L2 absorption fire together
+    # on a coin that has not yet made its 5%+ expansion move. Helps pre-breakout
+    # coils clear the entry-score gate so they surface as EARLY setups.
+    pre_breakout_coil_bonus: float = 12.0
 
 
 # Default component weights. These must mirror config/strategy.yaml: a

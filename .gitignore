@@ -46,3 +46,11 @@ build/
 Thumbs.db
 .idea/
 .vscode/
+.agents/
+*.txt
+frontend/.agent_patch.*
+test_binance*.py
+tmp_check_scans.py
+*.empty_bak
+
+

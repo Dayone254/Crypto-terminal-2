@@ -7,19 +7,19 @@ import { AlertRow, dismissAlert, fetchAlerts, fetchPendingAlerts } from "@/lib/a
 
 /** Presentation per alert type. */
 const ALERT_STYLES: Record<string, { label: string; color: string; bg: string }> = {
-    ZONE_A_ENTRY: { label: "ZONE A", color: "#10B981", bg: "rgba(16,185,129,0.14)" },
-    ZONE_B_ENTRY: { label: "ZONE B", color: "#34D399", bg: "rgba(52,211,153,0.14)" },
-    ZONE_A_APPROACH: { label: "APPROACH", color: "#06B6D4", bg: "rgba(6,182,212,0.14)" },
-    BREAKOUT_WATCH: { label: "BREAKOUT", color: "#3B82F6", bg: "rgba(59,130,246,0.14)" },
-    INVALIDATION: { label: "INVALIDATED", color: "#F43F5E", bg: "rgba(244,63,94,0.14)" },
-    DIGEST: { label: "DIGEST", color: "#A855F7", bg: "rgba(168,85,247,0.14)" },
+    ZONE_A_ENTRY: { label: "ZONE A", color: "var(--pos)", bg: "rgba(16,185,129,0.14)" },
+    ZONE_B_ENTRY: { label: "ZONE B", color: "var(--pos-bright)", bg: "rgba(52,211,153,0.14)" },
+    ZONE_A_APPROACH: { label: "APPROACH", color: "var(--info)", bg: "rgba(6,182,212,0.14)" },
+    BREAKOUT_WATCH: { label: "BREAKOUT", color: "var(--accent-blue)", bg: "rgba(59,130,246,0.14)" },
+    INVALIDATION: { label: "INVALIDATED", color: "var(--neg)", bg: "rgba(244,63,94,0.14)" },
+    DIGEST: { label: "DIGEST", color: "var(--accent-purple)", bg: "rgba(168,85,247,0.14)" },
 };
 
 function styleFor(alertType: string) {
     return (
         ALERT_STYLES[alertType] ?? {
             label: alertType.replace(/_/g, " "),
-            color: "#94A3B8",
+            color: "var(--text-3)",
             bg: "rgba(148,163,184,0.12)",
         }
     );
@@ -93,11 +93,11 @@ export const AlertsPanel: React.FC = () => {
         .slice(0, 10);
 
     return (
-        <div style={{ background: "#080A0F", borderRadius: 0, overflow: "hidden" }}>
+        <div style={{ background: "var(--surface-3)", borderRadius: 0, overflow: "hidden" }}>
             {/* Header */}
             <div
                 style={{
-                    background: "#0B0F19",
+                    background: "var(--surface-1)",
                     padding: "1rem 1.25rem",
                     display: "flex",
                     alignItems: "center",
@@ -186,7 +186,7 @@ export const AlertsPanel: React.FC = () => {
                                             alignItems: "center",
                                             gap: "0.6rem",
                                             padding: "0.55rem 0.65rem",
-                                            background: "#0B0F19",
+                                            background: "var(--surface-1)",
                                         }}
                                     >
                                         <div style={{ flex: 1, minWidth: 0 }}>

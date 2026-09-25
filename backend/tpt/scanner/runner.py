@@ -39,7 +39,7 @@ from tpt.engine.belief import FEATURE_VERSION, serialize_feature_vector
 from tpt.engine.exits import TargetEstimate, calibrate_targets
 from tpt.engine.features import FeatureDict, compute_features, multi_horizon_returns
 from tpt.engine.labeler import compute_tags, label
-from tpt.engine.ladder import compute_ladder, sanitize_ladder_dict
+from tpt.engine.ladder import compute_ladder, confirm_l2_structure, sanitize_ladder_dict
 from tpt.engine.regime import beta_state_from_thrust, detect_regime, macro_thrust
 from tpt.engine.scorer import ScoreBreakdown, score
 from tpt.engine.ws_broadcaster import ui_stream
@@ -160,6 +160,26 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
             await conn.commit()
     if inserted:
         logger.info("Inserted %d new backtest signal(s).", inserted)
+
+
+async def _persist_rejected_signals(rows: list[tuple[Any, ...]]) -> None:
+    """Insert signals that failed L2 confirmation with status='L2_REJECTED' for audit history."""
+    if not rows:
+        return
+
+    from tpt.data.database import get_connection
+
+    async with db_write_lock:
+        async with get_connection() as conn:
+            for row in rows:
+                await conn.execute(
+                    """INSERT INTO signals
+                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price, status, pipeline_version)
+                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?, 'L2_REJECTED', ?)""",
+                    row,
+                )
+            await conn.commit()
+    logger.info("Persisted %d L2_REJECTED signal row(s) for historical auditing.", len(rows))
 
 
 _scan_lock = asyncio.Lock()
@@ -374,6 +394,7 @@ async def _execute_scan(
         # held across the scan's network I/O.
         candidates_out: list[dict[str, Any]] = []
         pending_signals: list[tuple[Any, ...]] = []
+        l2_rejected_signals: list[tuple[Any, ...]] = []
         telegram_alerts: list[dict[str, Any]] = []
         snapshot_rows: list[dict[str, Any]] = []
         feature_rows: list[dict[str, Any]] = []
@@ -541,7 +562,7 @@ async def _execute_scan(
                 current_price = feats.get("last_price")
                 if t_a and current_price:
                     near_tranche_a = abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075
-                    if near_tranche_a and comp_score >= cfg.labeling.entry_zone_score_min:
+                    if near_tranche_a and comp_score >= cfg.labeling.min_composite_score:
                         primary_label = "ENTRY_ZONE"
                     elif primary_label == "ENTRY_ZONE":
                         primary_label = "COILED"
@@ -642,6 +663,37 @@ async def _execute_scan(
             if primary_label in ("ENTRY_ZONE", "COILED") and ladder_dict:
                 san = sanitize_ladder_dict(ladder_dict)
                 if san and san.get("tranche_a_price"):
+                    # Deterministic L2 confirmation gate (Part 3) — unconditional call
+                    l2_bids = feats.get("l2_bids")
+                    l2_asks = feats.get("l2_asks")
+                    l2_gate_res = confirm_l2_structure(
+                        symbol=pid,
+                        trade_direction=trade_direction,
+                        entry_price=san["tranche_a_price"],
+                        l2_bids=l2_bids,
+                        l2_asks=l2_asks,
+                    )
+                    score_dict["l2_gate_result"] = l2_gate_res
+
+                    # Fail-closed enforcement for live execution:
+                    # If L2 confirmation gate fails, persist row with status='L2_REJECTED'
+                    # so that historical audit traces exist, but DO NOT queue for live entry or alerts.
+                    if not l2_gate_res.get("passed"):
+                        logger.warning(
+                            "L2 Gate REJECTED signal for %s (%s): %s",
+                            pid, trade_direction, l2_gate_res.get("reason")
+                        )
+                        l2_rejected_signals.append((
+                            scan_run_id, pid, comp_score,
+                            json.dumps(score_dict), primary_label, trade_direction,
+                            san["tranche_a_price"],
+                            san["target_1_price"],
+                            san.get("target_2_price") or san["target_1_price"],
+                            san["stop_price"],
+                            "v2.0"
+                        ))
+                        continue
+
                     pending_signals.append((
                         scan_run_id, pid, comp_score,
                         json.dumps(score_dict), primary_label, trade_direction,
@@ -743,6 +795,7 @@ async def _execute_scan(
 
         # Signals + Telegram run outside the ORM transaction (own connections).
         await _persist_pending_signals(pending_signals)
+        await _persist_rejected_signals(l2_rejected_signals)
 
         for alert in telegram_alerts:
             try:

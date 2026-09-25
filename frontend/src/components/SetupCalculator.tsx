@@ -53,64 +53,65 @@ export function SetupCalculator({ symbol, lastPrice, ladder }: SetupCalculatorPr
         val >= 0 ? `+$${val.toFixed(2)}` : `-$${Math.abs(val).toFixed(2)}`;
 
     return (
-        <div style={{ background: "#0b0f19", border: "none", borderRadius: 0, padding: "1.25rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
-            {/* Header & Side Toggle */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "none", paddingBottom: "0.75rem" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <Sliders size={18} color="var(--accent-cyan)" />
-                    <span style={{ fontWeight: 800, fontSize: "0.9rem", color: "#FFF" }}>TRADE SETUP CALCULATOR</span>
-                </div>
+        <div style={{
+            display: "grid",
+            gridTemplateColumns: "220px 1fr",
+            gap: "2rem",
+            padding: "1rem 0"
+        }}>
+            {/* LEFT COLUMN: INPUTS */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
 
-                <div style={{ display: "flex", alignItems: "center", background: "rgba(0,0,0,0.5)", padding: "0.25rem", borderRadius: 0, border: "none" }}>
+                <div style={{ display: "flex", width: "100%", border: "1px solid var(--line)" }}>
                     <button
                         onClick={() => setSide("LONG")}
                         style={{
+                            flex: 1,
                             display: "flex",
                             alignItems: "center",
-                            gap: "0.3rem",
-                            padding: "0.35rem 0.85rem",
-                            borderRadius: 0,
-                            fontWeight: 800,
-                            fontSize: "0.75rem",
-                            cursor: "pointer",
+                            justifyContent: "center",
+                            gap: "0.25rem",
+                            padding: "0.35rem 0",
+                            background: side === "LONG" ? "var(--bg-pos)" : "transparent",
+                            color: side === "LONG" ? "var(--pos)" : "var(--text-4)",
                             border: "none",
-                            background: side === "LONG" ? "var(--accent-emerald)" : "transparent",
-                            color: side === "LONG" ? "#000" : "var(--text-muted)",
+                            borderRight: "1px solid var(--line)",
+                            fontWeight: 800,
+                            fontSize: "0.65rem",
+                            cursor: "pointer",
                             transition: "all 0.15s ease",
                         }}
                     >
-                        <ArrowUpRight size={14} /> LONG
+                        LONG
                     </button>
                     <button
                         onClick={() => setSide("SHORT")}
                         style={{
+                            flex: 1,
                             display: "flex",
                             alignItems: "center",
-                            gap: "0.3rem",
-                            padding: "0.35rem 0.85rem",
-                            borderRadius: 0,
-                            fontWeight: 800,
-                            fontSize: "0.75rem",
-                            cursor: "pointer",
+                            justifyContent: "center",
+                            gap: "0.25rem",
+                            padding: "0.35rem 0",
+                            background: side === "SHORT" ? "var(--bg-neg)" : "transparent",
+                            color: side === "SHORT" ? "var(--neg)" : "var(--text-4)",
                             border: "none",
-                            background: side === "SHORT" ? "var(--accent-rose)" : "transparent",
-                            color: side === "SHORT" ? "#FFF" : "var(--text-muted)",
+                            fontWeight: 800,
+                            fontSize: "0.65rem",
+                            cursor: "pointer",
                             transition: "all 0.15s ease",
                         }}
                     >
-                        <ArrowDownRight size={14} /> SHORT
+                        SHORT
                     </button>
                 </div>
-            </div>
 
-            {/* Inputs: Position Allocation & Leverage */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
                 <div>
-                    <label style={{ fontSize: "0.7rem", color: "var(--text-dim)", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: "0.3rem" }}>
-                        Capital Allocation ($)
+                    <label style={{ fontSize: "0.65rem", color: "var(--text-3)", fontWeight: 500, display: "block", marginBottom: "0.4rem" }}>
+                        ALLOCATION
                     </label>
                     <div style={{ position: "relative" }}>
-                        <DollarSign size={14} color="var(--text-dim)" style={{ position: "absolute", left: "0.75rem", top: "50%", transform: "translateY(-50%)" }} />
+                        <DollarSign size={12} color="var(--text-3)" style={{ position: "absolute", left: "0.5rem", top: "50%", transform: "translateY(-50%)" }} />
                         <input
                             type="number"
                             value={accountSize}
@@ -118,13 +119,11 @@ export function SetupCalculator({ symbol, lastPrice, ladder }: SetupCalculatorPr
                             className="mono"
                             style={{
                                 width: "100%",
-                                background: "rgba(0,0,0,0.6)",
-                                border: "none",
-                                borderRadius: 0,
-                                padding: "0.45rem 0.75rem 0.45rem 2.25rem",
-                                color: "#FFF",
-                                fontWeight: 700,
-                                fontSize: "0.9rem",
+                                background: "transparent",
+                                border: "1px solid var(--line-heavy)",
+                                padding: "0.35rem 0.5rem 0.35rem 1.5rem",
+                                color: "var(--text-main)",
+                                fontSize: "0.8rem",
                                 outline: "none",
                             }}
                         />
@@ -132,66 +131,55 @@ export function SetupCalculator({ symbol, lastPrice, ladder }: SetupCalculatorPr
                 </div>
 
                 <div>
-                    <label style={{ fontSize: "0.7rem", color: "var(--text-dim)", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: "0.3rem" }}>
-                        Leverage ({leverage}x)
+                    <label style={{ fontSize: "0.65rem", color: "var(--text-3)", fontWeight: 500, display: "block", marginBottom: "0.4rem" }}>
+                        LEVERAGE ({leverage}X)
                     </label>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                        <input
-                            type="range"
-                            min={1}
-                            max={10}
-                            step={1}
-                            value={leverage}
-                            onChange={(e) => setLeverage(Number(e.target.value))}
-                            style={{ width: "100%", accentColor: "var(--accent-cyan)", cursor: "pointer" }}
-                        />
-                        <span className="mono" style={{ background: "rgba(6,182,212,0.15)", border: "none", color: "var(--accent-cyan)", padding: "0.3rem 0.6rem", borderRadius: 0, fontWeight: 800, fontSize: "0.8rem", minWidth: "40px", textAlign: "center" }}>
-                            {leverage}x
-                        </span>
+                    <input
+                        type="range"
+                        min={1}
+                        max={10}
+                        step={1}
+                        value={leverage}
+                        onChange={(e) => setLeverage(Number(e.target.value))}
+                        style={{ width: "100%", accentColor: "var(--info)", cursor: "pointer" }}
+                    />
+                </div>
+            </div>
+
+            {/* RIGHT COLUMN: OUTPUTS */}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: "0.5rem", marginBottom: "0.5rem" }}>
+                    <span style={{ fontSize: "0.7rem", color: "var(--text-4)", fontWeight: 500 }}>POSITION EXPOSURE</span>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--text-main)", fontSize: "0.85rem", fontWeight: 700 }}>${positionSize.toLocaleString()}</span>
                     </div>
                 </div>
-            </div>
 
-            {/* Position Summary */}
-            <div className="mono" style={{ background: "rgba(0,0,0,0.5)", border: "none", borderRadius: 0, padding: "0.6rem 0.85rem", display: "flex", justifyContent: "space-between", fontSize: "0.75rem" }}>
-                <span style={{ color: "var(--text-muted)" }}>Total Position Exposure:</span>
-                <span style={{ color: "#FFF", fontWeight: 800 }}>${positionSize.toLocaleString()} USD ({tokenUnits.toFixed(2)} {symbol.split("-")[0]})</span>
-            </div>
-
-            {/* Dynamic Risk & Reward Output Cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.75rem", textAlign: "center" }}>
-                {/* Max Risk (SL) */}
-                <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "none", borderRadius: 0, padding: "0.6rem 0.75rem" }}>
-                    <span style={{ fontSize: "0.65rem", fontWeight: 800, color: "#F87171", textTransform: "uppercase", display: "block" }}>Max Loss (SL)</span>
-                    <span className="mono" style={{ fontSize: "1rem", fontWeight: 800, color: "#F87171", display: "block", marginTop: "0.2rem" }}>
-                        {formatCurr(stopPnL.pnl)}
-                    </span>
-                    <span className="mono" style={{ fontSize: "0.65rem", color: "rgba(248, 113, 113, 0.8)", display: "block" }}>
-                        {stopPnL.pct.toFixed(2)}%
-                    </span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: "0.5rem", marginBottom: "0.5rem" }}>
+                    <span style={{ fontSize: "0.7rem", color: "var(--text-4)", fontWeight: 500 }}>MAX LOSS (SL)</span>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--neg-bright)", fontSize: "0.85rem", fontWeight: 700, display: "block" }}>{formatCurr(stopPnL.pnl)}</span>
+                        <span className="mono" style={{ color: "var(--neg)", fontSize: "0.65rem" }}>{stopPnL.pct.toFixed(2)}%</span>
+                    </div>
                 </div>
 
-                {/* Target 1 PnL */}
-                <div style={{ background: "rgba(59, 130, 246, 0.1)", border: "none", borderRadius: 0, padding: "0.6rem 0.75rem" }}>
-                    <span style={{ fontSize: "0.65rem", fontWeight: 800, color: "#60A5FA", textTransform: "uppercase", display: "block" }}>Target 1 PnL</span>
-                    <span className="mono" style={{ fontSize: "1rem", fontWeight: 800, color: "#60A5FA", display: "block", marginTop: "0.2rem" }}>
-                        {formatCurr(t1PnL.pnl)}
-                    </span>
-                    <span className="mono" style={{ fontSize: "0.65rem", color: "rgba(96, 165, 250, 0.8)", display: "block" }}>
-                        +{t1PnL.pct.toFixed(2)}%
-                    </span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: "0.5rem", marginBottom: "0.5rem" }}>
+                    <span style={{ fontSize: "0.7rem", color: "var(--text-4)", fontWeight: 500 }}>TARGET 1</span>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--accent-blue-bright)", fontSize: "0.85rem", fontWeight: 700, display: "block" }}>{formatCurr(t1PnL.pnl)}</span>
+                        <span className="mono" style={{ color: "var(--accent-blue)", fontSize: "0.65rem" }}>+{t1PnL.pct.toFixed(2)}%</span>
+                    </div>
                 </div>
 
-                {/* Target 2 PnL */}
-                <div style={{ background: "rgba(139, 92, 246, 0.1)", border: "none", borderRadius: 0, padding: "0.6rem 0.75rem" }}>
-                    <span style={{ fontSize: "0.65rem", fontWeight: 800, color: "#C084FC", textTransform: "uppercase", display: "block" }}>Target 2 PnL</span>
-                    <span className="mono" style={{ fontSize: "1rem", fontWeight: 800, color: "#C084FC", display: "block", marginTop: "0.2rem" }}>
-                        {formatCurr(t2PnL.pnl)}
-                    </span>
-                    <span className="mono" style={{ fontSize: "0.65rem", color: "rgba(192, 132, 252, 0.8)", display: "block" }}>
-                        +{t2PnL.pct.toFixed(2)}%
-                    </span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <span style={{ fontSize: "0.7rem", color: "var(--text-4)", fontWeight: 500 }}>TARGET 2</span>
+                    <div style={{ textAlign: "right" }}>
+                        <span className="mono" style={{ color: "var(--accent-purple-bright)", fontSize: "0.85rem", fontWeight: 700, display: "block" }}>{formatCurr(t2PnL.pnl)}</span>
+                        <span className="mono" style={{ color: "var(--accent-purple)", fontSize: "0.65rem" }}>+{t2PnL.pct.toFixed(2)}%</span>
+                    </div>
                 </div>
+
             </div>
         </div>
     );

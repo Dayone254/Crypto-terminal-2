@@ -13,9 +13,10 @@ _client: httpx.AsyncClient | None = None
 
 def get_client() -> httpx.AsyncClient:
     global _client
-    if _client is None:
+    if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(base_url=BINANCE_FUTURES_API, timeout=5.0)
     return _client
+
 
 
 async def close_client() -> None:
@@ -72,28 +73,32 @@ async def get_open_interest_hist(symbol: str) -> dict[str, float] | None:
         return {"oi_change_pct": 0.0}
 
 
-async def get_futures_klines(symbol: str, interval: str = "1h", limit: int = 300) -> list[list[Any]]:
+async def get_futures_klines(symbol: str, interval: str = "1h", limit: int = 300, before_ts: int | None = None) -> list[list[Any]]:
     """Fetch live Kline candlestick data from Binance Futures API.
 
     Args:
         symbol: e.g. "BTCUSDT" or "NEARUSDT"
         interval: e.g. "15m", "1h", "6h", "1d"
         limit: number of candles (default 300)
+        before_ts: Unix timestamp (seconds) to fetch candles before
 
     Returns:
         Formatted candle lists: [[timestamp_sec, low, high, open, close, volume], ...]
     """
     client = get_client()
     try:
-        # Standardize Binance symbol (e.g. NEAR-USD -> NEARUSDT)
         formatted_sym = symbol.upper().replace("-USD", "USDT").replace("-", "")
+        params: dict[str, Any] = {
+            "symbol": formatted_sym,
+            "interval": interval,
+            "limit": limit
+        }
+        if before_ts:
+            params["endTime"] = int(before_ts) * 1000
+
         res = await client.get(
             "/fapi/v1/klines",
-            params={
-                "symbol": formatted_sym,
-                "interval": interval,
-                "limit": limit
-            }
+            params=params
         )
         if res.status_code == 200:
             klines = res.json()
@@ -107,7 +112,8 @@ async def get_futures_klines(symbol: str, interval: str = "1h", limit: int = 300
                 low_p = float(k[3])
                 close_p = float(k[4])
                 vol = float(k[5])
-                results.append([t_sec, low_p, high_p, open_p, close_p, vol])
+                results.append([t_sec, open_p, high_p, low_p, close_p, vol])
+
             return results
         return []
     except Exception:

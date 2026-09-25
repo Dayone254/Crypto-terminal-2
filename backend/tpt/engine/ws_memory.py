@@ -18,6 +18,7 @@ class BackgroundMemoryStore:
         self._active_symbols: set[str] = set()
         self.macro_options_cache: dict[str, Any] = {}
         self._options_task: asyncio.Task | None = None
+        self._orderflow_tasks: dict[str, asyncio.Task] = {}  # per-underlying trade stream tasks
 
     def get_l2(self, product_id: str) -> dict[str, Any] | None:
         """Returns the latest parsed L2 order book geometry."""
@@ -96,32 +97,59 @@ class BackgroundMemoryStore:
             )
 
     def start_options_daemon(self) -> asyncio.Task:
-        """Start the macro options-flow refresh loop.
+        """Start the macro options-flow refresh loop AND the orderflow trade streams.
 
         Deliberately independent of L2 subscriptions: options gamma/IV-skew for
         BTC/ETH must keep working even when live WebSocket streaming is disabled.
         """
         if self._options_task is None or self._options_task.done():
             self._options_task = asyncio.create_task(self._sync_options_flow())
+
+        # Launch rolling orderflow accumulators for BTC and ETH
+        for underlying in ("BTC", "ETH"):
+            task = self._orderflow_tasks.get(underlying)
+            if task is None or task.done():
+                from tpt.engine.orderflow_accumulator import run_orderflow_stream
+                self._orderflow_tasks[underlying] = asyncio.create_task(
+                    run_orderflow_stream(underlying)
+                )
+                logger.info("Orderflow stream task started for %s", underlying)
+
+        # Launch Deribit real-time WebSocket board streamers (BTC + ETH only)
+        if settings.enable_live_ws:
+            try:
+                from tpt.adapters.deribit_ws import start_deribit_ws_streams
+                start_deribit_ws_streams(["BTC", "ETH"])
+                logger.info("Deribit WS stream tasks launched for BTC, ETH")
+            except Exception as dws_e:
+                logger.warning("Deribit WS stream failed to start: %s", dws_e)
+
         return self._options_task
 
     async def _sync_options_flow(self):
-        """Background loop caching Deribit Options Flow precisely every 5 minutes."""
+        """Background loop caching Deribit/Multi-Venue Options Flow every 15 seconds.
+        Runs immediately on startup so fresh data is always available."""
         from tpt.engine.options_flow import calculate_macro_gamma_exposure
+        # Yield briefly so FastAPI lifespan finishes startup cleanly
+        await asyncio.sleep(2.0)
         while True:
             try:
-                btc_flow = await calculate_macro_gamma_exposure("BTC", 0.0)
-                eth_flow = await calculate_macro_gamma_exposure("ETH", 0.0)
-                if btc_flow:
-                    self.macro_options_cache["BTC"] = btc_flow
-                if eth_flow:
-                    self.macro_options_cache["ETH"] = eth_flow
-                logger.info("Successfully updated global Macro Options memory cache.")
+                for underlying in ("BTC", "ETH"):
+                    try:
+                        flow = await asyncio.wait_for(calculate_macro_gamma_exposure(underlying, 0.0), timeout=15.0)
+                        if flow:
+                            self.macro_options_cache[underlying] = flow
+                    except Exception as sym_e:
+                        logger.warning(f"Options sync error for {underlying}: {sym_e}")
+                    await asyncio.sleep(0.1)  # Yield to event loop between underlying assets
+                logger.info("Successfully updated global Macro Options memory cache for BTC, ETH.")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Macro Options Daemon Sync Error: {e}")
-            await asyncio.sleep(300)
+            await asyncio.sleep(20)
+
+
 
     async def sync_active_universe(self, current_product_ids: list[str]):
         """Cancel streams for symbols no longer in the active list to prevent unbounded task leaks."""

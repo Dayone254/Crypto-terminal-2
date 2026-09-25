@@ -1,6 +1,10 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import os
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -50,9 +54,10 @@ async def _scan_scheduler_loop() -> None:
         logger.info("Scheduled scanning disabled (SCAN_INTERVAL_SECONDS=%s).", interval)
         return
 
+    # Yield 10s on startup so FastAPI server completes startup & serves initial API requests
+    await asyncio.sleep(10.0)
     logger.info("Scheduled scanning every %ss.", interval)
     while True:
-        await asyncio.sleep(interval)
         try:
             from tpt.scanner.runner import run_scan
 
@@ -75,6 +80,8 @@ async def _scan_scheduler_loop() -> None:
         except Exception as exc:
             logger.error("Alert delivery failed: %s", exc)
 
+        await asyncio.sleep(interval)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -94,6 +101,7 @@ async def lifespan(app: FastAPI):
         )
         await db.commit()
 
+    from tpt.catalyst.daemon import catalyst_daemon_loop
     from tpt.engine.evaluator import evaluator_loop
     from tpt.engine.ws_memory import ws_memory
 
@@ -104,6 +112,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(evaluator_loop(), name="evaluator"),
         asyncio.create_task(_scan_scheduler_loop(), name="scan-scheduler"),
+        asyncio.create_task(catalyst_daemon_loop(), name="catalyst-daemon"),
         options_task,
     ]
     try:
@@ -129,15 +138,13 @@ def create_app() -> FastAPI:
         settings.frontend_url,
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     })
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     if settings.api_token:
         @application.middleware("http")
         async def enforce_api_token(request: Request, call_next):
@@ -148,6 +155,29 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
+    # CORSMiddleware must be added LAST so it becomes the OUTERMOST middleware,
+    # ensuring CORS headers (Access-Control-Allow-Origin) are attached to ALL responses,
+    # including 500 Internal Server Errors, 504 Gateway Timeouts, and 401s.
+    allowed_origins = sorted({
+        settings.frontend_url,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    })
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Routers
     application.include_router(health.router, prefix="/api/v1", tags=["health"])
     application.include_router(markets.router, prefix="/api/v1", tags=["markets"])
@@ -156,10 +186,13 @@ def create_app() -> FastAPI:
     application.include_router(config.router, prefix="/api/v1/config", tags=["config"])
     application.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])
 
-    from tpt.api.routes import backtest, ws_candles, ws_l2
+    from tpt.api.routes import backtest, catalyst, research, ws_candles, ws_l2, ws_options
     application.include_router(ws_l2.router, prefix="/api/v1/ws/l2", tags=["websockets"])
     application.include_router(ws_candles.router, prefix="/api/v1/ws/candles", tags=["websockets"])
+    application.include_router(ws_options.router, prefix="/api/v1/ws/options", tags=["websockets"])
     application.include_router(backtest.router, prefix="/api/v1/backtest", tags=["backtest"])
+    application.include_router(research.router, prefix="/api/v1/research", tags=["research"])
+    application.include_router(catalyst.router, prefix="/api/v1/catalyst", tags=["catalyst"])
 
     return application
 

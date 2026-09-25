@@ -51,9 +51,9 @@ def _get_xgb_model():
         if os.path.exists(model_path):
             try:
                 _xgb_model = joblib.load(model_path)
-                print(">>> [SCORER] Loaded Machine Learning Binary: taperadar_xgboost_v1.joblib")
+                logger.info(">>> [SCORER] Loaded Machine Learning Binary: taperadar_xgboost_v1.joblib")
             except Exception as e:
-                print(f"Failed to load XGBoost: {e}")
+                logger.error(f"Failed to load XGBoost: {e}")
     return _xgb_model
 
 def normalize_features(features: FeatureDict, direction: str) -> dict[str, float]:
@@ -291,6 +291,24 @@ def score(
     if norm.get("volume_expansion", 0.0) > 0.5 and norm.get("bb_squeeze", 0.0) > 0.5:
         features_ix += config.interaction_bonuses.breakout_bonus
 
+    # 2b. Pre-Breakout Coil: BB squeeze + volume surge + 1h RS lead — catches coins
+    #     before the 5%+ expansion leg forms. Only boosted for LONG setups.
+    #     This fires even when day_change is still small (coil hasn't broken yet),
+    #     ensuring these setups clear the score gate and reach EARLY classification.
+    if trade_direction == "LONG":
+        _bb_w = float(features.get("bb_width_1h") or 0.0)
+        _vol_r = float(features.get("volume_ratio_1h") or 1.0)
+        _rs_1h = features.get("rs_vs_btc_1h")
+        _l2_buy = float(features.get("l2_buy_vol_2pct") or 0.0)
+        _pre_coil_bb = 0.0 < _bb_w < 0.04
+        _pre_coil_vol = _vol_r >= 2.0
+        _pre_coil_rs = _rs_1h is not None and float(_rs_1h) >= 1.5
+        _pre_coil_l2 = _l2_buy >= 150_000.0
+        if _pre_coil_bb and _pre_coil_vol and (_pre_coil_rs or _pre_coil_l2):
+            _coil_bonus = getattr(config.interaction_bonuses, "pre_breakout_coil_bonus", 12.0)
+            features_ix += _coil_bonus
+            components_dump["pre_breakout_coil_bonus"] = _coil_bonus
+
     # 3. Regime Modifiers
     # Shorting into TRENDING_UP (or longing into TRENDING_DOWN) fights the macro trend.
     counter_trend = (
@@ -344,69 +362,101 @@ def score(
                 macro_ix -= 20.0
                 components_dump["crowded_short_penalty"] = -20.0
 
-    # 5. Options Gamma Flow Resistance/Support (GEX)
+    # 5. Options Gamma Flow Resistance/Support & Global Macro Gamma Propagation
     from tpt.engine.ws_memory import ws_memory
     pid = features.get("product_id")
-    if pid and "-" in pid:
-        underlying = pid.split("-")[0]
-        options = ws_memory.get_macro_options(underlying)
-        if options:
-            gamma_walls = options.get("gamma_walls", [])
-            calls = sorted([w["strike"] for w in gamma_walls if w["type"] == "RESISTANCE"])
-            puts = sorted([w["strike"] for w in gamma_walls if w["type"] == "SUPPORT"])
-            last_p = float(features.get("last_price", 0))
+    underlying = pid.split("-")[0] if pid and "-" in pid else "BTC"
 
+    # A) Global BTC Options Gamma Propagation (Applies macro directional influence to ALL assets)
+    btc_options = ws_memory.get_macro_options("BTC")
+    if btc_options:
+        btc_regime = btc_options.get("regime", "LONG_GAMMA_STABLE")
+        btc_gex = float(btc_options.get("total_net_gex_millions") or 0.0)
+
+        if btc_regime == "SHORT_GAMMA_VOLATILE" or btc_gex < 0.0:
             if trade_direction == "LONG":
-                # Trapped tightly under a Call Wall (Negative GEX Resistance)
-                closest_call = next((w for w in calls if w > last_p), None)
-                if closest_call and (closest_call - last_p) / last_p < 0.015:
-                    macro_ix -= 10.0
-                    components_dump["gamma_wall_resistance"] = -10.0
-                
-                # Bouncing off a Put Wall (Positive GEX Support)
-                closest_put = next((w for w in reversed(puts) if w < last_p), None)
-                if closest_put and (last_p - closest_put) / closest_put < 0.01:
-                    macro_ix += 12.0
-                    components_dump["gamma_wall_support"] = 12.0
-
+                macro_ix -= 15.0
+                components_dump["btc_short_gamma_headwind"] = -15.0
             else: # SHORT
-                # Bouncing off a Call Wall (Resistance)
-                closest_call = next((w for w in calls if w > last_p), None)
-                if closest_call and (closest_call - last_p) / last_p < 0.01:
-                    macro_ix += 12.0
-                    components_dump["gamma_wall_resistance_bounce"] = 12.0
-                
-                # Trapped directly above a Put Wall (Support)
-                closest_put = next((w for w in reversed(puts) if w < last_p), None)
-                if closest_put and (last_p - closest_put) / closest_put < 0.015:
-                    macro_ix -= 10.0
-                    components_dump["gamma_wall_support"] = -10.0
+                macro_ix += 12.0
+                components_dump["btc_short_gamma_tailwind"] = 12.0
+        elif btc_regime == "LONG_GAMMA_STABLE" and btc_gex > 0.0:
+            if trade_direction == "LONG":
+                macro_ix += 10.0
+                components_dump["btc_long_gamma_support"] = 10.0
+            else: # SHORT
+                macro_ix -= 12.0
+                components_dump["btc_long_gamma_dampener"] = -12.0
 
-            # 6. Volatility IV Skew (Fear / Greed Metric)
-            # Positive Skew = Puts are higher IV = Fear (Bearish)
-            # Negative Skew = Calls are higher IV = Greed (Bullish)
-            skew = options.get("iv_skew", 0.0)
-            if skew > 0.03: # High Fear (Bearish sentiment)
-                if trade_direction == "LONG":
-                    macro_ix -= 12.0
-                    components_dump["high_put_skew_penalty"] = -12.0
-                else: 
-                    macro_ix += 8.0
-                    components_dump["high_put_skew_bonus"] = 8.0
-            elif skew < -0.03: # Extreme Greed (Bullish Sentiment)
-                if trade_direction == "LONG":
-                    macro_ix += 10.0
-                    components_dump["call_skew_greed_bonus"] = 10.0
-                else:
-                    macro_ix -= 12.0
-                    components_dump["call_skew_greed_penalty"] = -12.0
+    # B) Symbol-Specific Options Board (Walls & Skew for BTC/ETH)
+    options = ws_memory.get_macro_options(underlying)
+    if options:
+        gamma_walls = options.get("gamma_walls", [])
+        calls = sorted([w["strike"] for w in gamma_walls if w["type"] == "RESISTANCE"])
+        puts = sorted([w["strike"] for w in gamma_walls if w["type"] == "SUPPORT"])
+        last_p = float(features.get("last_price", 0))
 
-    # 7. Relative Strength (7d vs BTC)
-    # Same 7d horizon as the weighted component above. Scoring the same input
-    # twice — once as a weighted component and again as a bonus — is what let a
-    # candle-blind symbol saturate the top of the scale, so both now read the one
-    # independent, multi-horizon measure.
+        if trade_direction == "LONG":
+            # Trapped tightly under a Call Wall (Negative GEX Resistance)
+            closest_call = next((w for w in calls if w > last_p), None)
+            if closest_call and (closest_call - last_p) / last_p < 0.015:
+                macro_ix -= 10.0
+                components_dump["gamma_wall_resistance"] = -10.0
+            
+            # Bouncing off a Put Wall (Positive GEX Support)
+            closest_put = next((w for w in reversed(puts) if w < last_p), None)
+            if closest_put and (last_p - closest_put) / closest_put < 0.01:
+                macro_ix += 12.0
+                components_dump["gamma_wall_support"] = 12.0
+
+        else: # SHORT
+            # Bouncing off a Call Wall (Resistance)
+            closest_call = next((w for w in calls if w > last_p), None)
+            if closest_call and (closest_call - last_p) / last_p < 0.01:
+                macro_ix += 12.0
+                components_dump["gamma_wall_resistance_bounce"] = 12.0
+            
+            # Trapped directly above a Put Wall (Support)
+            closest_put = next((w for w in reversed(puts) if w < last_p), None)
+            if closest_put and (last_p - closest_put) / closest_put < 0.015:
+                macro_ix -= 10.0
+                components_dump["gamma_wall_support"] = -10.0
+
+        # 6. Volatility IV Skew (Fear / Greed Metric)
+        skew = options.get("iv_skew", 0.0)
+        if skew > 0.03: # High Fear (Bearish sentiment)
+            if trade_direction == "LONG":
+                macro_ix -= 12.0
+                components_dump["high_put_skew_penalty"] = -12.0
+            else: 
+                macro_ix += 8.0
+                components_dump["high_put_skew_bonus"] = 8.0
+        elif skew < -0.03: # Extreme Greed (Bullish Sentiment)
+            if trade_direction == "LONG":
+                macro_ix += 10.0
+                components_dump["call_skew_greed_bonus"] = 10.0
+            else:
+                macro_ix -= 12.0
+                components_dump["call_skew_greed_penalty"] = -12.0
+
+    # 7. Catalyst Intelligence Boost (dev activity + news + volume surge)
+    # Reads from the in-memory cache populated by the catalyst daemon every 15 min.
+    # Zero I/O — safe to call synchronously from inside asyncio.to_thread.
+    try:
+        from tpt.catalyst.watchlist_boost import get_catalyst_boost_sync
+        _cat_boost = get_catalyst_boost_sync(pid or "")
+        if _cat_boost > 0:
+            macro_ix += _cat_boost
+            components_dump["catalyst_boost"] = _cat_boost
+    except Exception as _cex:
+        logger.debug("[scorer] catalyst boost skipped: %s", _cex)
+
+    # 8. Multi-Horizon Relative Strength (7d, 30d, 60d vs BTC)
     rs = rs_vs_btc_7d
+    rs_30d = features.get("rs_vs_btc_30d")
+    rs_60d = features.get("rs_vs_btc_60d")
+
+    # 7d Short-term Relative Strength
     if rs is not None and rs > 2.0:
         if trade_direction == "LONG":
             bonus = min(15.0, rs * RS_7D_BONUS_FACTOR)
@@ -425,6 +475,20 @@ def score(
             penalty = min(15.0, abs(rs) * RS_7D_BONUS_FACTOR)
             features_ix -= penalty
             components_dump["rs_btc_long_penalty"] = -penalty
+
+    # 30-60 Day Medium-Term Altcoin Underperformance Multiplier
+    # Underperforming altcoins have high downside beta when BTC breaks down in Short Gamma regimes
+    is_underperforming = (rs_30d is not None and rs_30d < -5.0) or (rs_60d is not None and rs_60d < -10.0)
+    btc_is_short_gamma = btc_options and (btc_options.get("regime") == "SHORT_GAMMA_VOLATILE" or float(btc_options.get("total_net_gex_millions") or 0.0) < 0.0)
+
+    if is_underperforming:
+        if btc_is_short_gamma:
+            if trade_direction == "SHORT":
+                macro_ix += 15.0
+                components_dump["alt_underperformance_short_boost"] = 15.0
+            else: # LONG
+                macro_ix -= 20.0
+                components_dump["alt_underperformance_long_penalty"] = -20.0
 
     # 8. Macro beta headwind — BTC's own push, priced rather than vetoed.
     #

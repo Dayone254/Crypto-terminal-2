@@ -12,7 +12,7 @@ export default function ComparePage() {
             <header style={{
                 padding: "0.75rem 1.5rem",
                 borderBottom: "none",
-                background: "#080A0F",
+                background: "var(--surface-3)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
@@ -21,7 +21,7 @@ export default function ComparePage() {
                 <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                     <Link href="/" style={{ display: "flex", alignItems: "center", gap: "0.5rem", textDecoration: "none" }}>
                         <div style={{ background: "rgba(6,182,212,0.15)", border: "none", padding: "0.3rem", borderRadius: "6px", display: "flex" }}>
-                            <Zap size={16} color="#06B6D4" fill="#06B6D4" />
+                            <Zap size={16} color="var(--info)" fill="var(--info)" />
                         </div>
                         <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--text-muted)", letterSpacing: "0.05em" }}>
                             TOP PICKER TERMINAL
@@ -29,8 +29,8 @@ export default function ComparePage() {
                     </Link>
                     <span style={{ color: "var(--panel-border)" }}>|</span>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                        <LayoutGrid size={14} color="#06B6D4" />
-                        <span style={{ fontSize: "0.8rem", fontWeight: 800, color: "#E2E8F0", letterSpacing: "0.03em" }}>
+                        <LayoutGrid size={14} color="var(--info)" />
+                        <span style={{ fontSize: "0.8rem", fontWeight: 800, color: "var(--text-2)", letterSpacing: "0.03em" }}>
                             MULTI-CHART COMPARE
                         </span>
                     </div>

@@ -59,7 +59,7 @@ async def get_latest_ladder_and_score(
         .outerjoin(Ladder, (Score.product_id == Ladder.product_id) & (Score.scan_run_id == Ladder.scan_run_id))
         .outerjoin(Feature, (Score.product_id == Feature.product_id) & (Score.scan_run_id == Feature.scan_run_id))
         .where(Score.product_id == product_id)
-        .order_by(Score.computed_at.desc())
+        .order_by(Score.scan_run_id.desc())
         .limit(1)
     )
     res = await db.execute(stmt)
@@ -81,6 +81,9 @@ async def get_latest_ladder_and_score(
             "tranche_b_size_pct": ladder_rec.tranche_b_size_pct,
             "trade_direction": getattr(ladder_rec, "trade_direction", "LONG"),
             "basis": json.loads(ladder_rec.basis) if ladder_rec.basis else {},
+            # Carried through so sanitize honours the calibrated multiple rather
+            # than restoring its 2.0R default on every read.
+            "target_r": getattr(ladder_rec, "target_r", None),
         }
         ladder_dict = sanitize_ladder_dict(ladder_dict)
 
@@ -97,6 +100,21 @@ async def get_latest_ladder_and_score(
             "swing_shelf_7d": feat_rec.swing_shelf_7d,
             "swing_high_7d": feat_rec.swing_high_7d,
         }
+
+    # The raw readings the scorer actually consumed, straight out of the flight
+    # recorder. `score_breakdown` carries the *normalised* components (all in
+    # [-1, 1]); prose needs the raw values to say "RSI 42" instead of
+    # "momentum +0.32" — and without them the UI could only assert, not report.
+    # Null for rows written before the recorder existed.
+    inputs: dict[str, Any] | None = None
+    raw_vector = getattr(feat_rec, "feature_vector", None) if feat_rec else None
+    if raw_vector:
+        try:
+            parsed = json.loads(raw_vector)
+            if isinstance(parsed, dict):
+                inputs = parsed
+        except (TypeError, ValueError):
+            inputs = None
 
     # Derive trade_direction mathematically from ladder if present
     effective_direction = getattr(score_rec, "trade_direction", None)
@@ -115,10 +133,17 @@ async def get_latest_ladder_and_score(
     return {
         "product_id": product_id,
         "composite_score": score_rec.composite_score,
+        # Belief state: how good the evidence was, and how much of the model it
+        # covered — so a bare score can never be read as high conviction on its own.
+        "edge": getattr(score_rec, "edge", None),
+        "coverage": getattr(score_rec, "coverage", None),
+        "coverage_band": getattr(score_rec, "coverage_band", None),
         "label": score_rec.label,
         "trade_direction": effective_direction,
+        "last_price": feat_rec.last_price if feat_rec else None,
         "score_breakdown": json.loads(score_rec.score_breakdown) if score_rec.score_breakdown else {},
         "ladder": ladder_dict,
         "features": feat_dict,
+        "inputs": inputs,
         "updated_at": score_rec.computed_at,
     }

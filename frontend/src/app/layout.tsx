@@ -6,10 +6,16 @@ export const metadata: Metadata = {
     description: "Crypto market scanner — Coinbase USD spot pairs. COILED / EARLY / CHASE detection with limit ladders.",
 };
 
+import { SidebarProvider } from "@/contexts/SidebarContext";
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
     return (
         <html lang="en">
-            <body>{children}</body>
+            <body>
+                <SidebarProvider>
+                    {children}
+                </SidebarProvider>
+            </body>
         </html>
     );
 }

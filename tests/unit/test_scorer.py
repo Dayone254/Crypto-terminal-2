@@ -77,3 +77,71 @@ def test_scorer_regime_modifier() -> None:
     assert s_short["components"]["trend_aligned"] == 0.0
     assert s_short["interactions"] < 0.0  # Counter-trend penalty
 
+
+def _strong_long_features(rs_7d: float) -> dict:
+    """A fully-observed LONG setup: all six components backed, coverage 1.00."""
+    return {
+        "last_price": 100.0,
+        "day_change_pct": 3.0,
+        "pos_in_range": 0.50,
+        "quote_vol_24h": 10_000_000.0,
+        "vwap_24h": 100.0,
+        "rsi_1h": 55.0,
+        "bb_width_1h": 0.05,
+        "rs_vs_btc_7d": rs_7d,
+        "fib_500": 100.0,
+        "fib_618": 95.0,
+        "l2_buy_vol_2pct": 300_000.0,
+    }
+
+
+def test_macro_beta_headwind_is_priced_not_vetoed() -> None:
+    """The behaviour that replaced the hard SKIP.
+
+    The labeler used to return SKIP for every LONG whenever BTC was dumping,
+    which on a live scan silently discarded all 72 longs — eleven of them scoring
+    >=60 and averaging 79.9. The hostility is now a penalty in proportion to its
+    magnitude, so an exceptional setup can still clear the entry gate while a
+    marginal one still cannot.
+    """
+    feats = _strong_long_features(rs_7d=30.0)
+
+    calm = score(feats, trade_direction="LONG", macro_thrust=0.0)
+    dump = score(feats, trade_direction="LONG", macro_thrust=-3.0)
+
+    # Full coverage: every component had real data.
+    assert calm["coverage"] == 1.0
+    # Hostile tape costs points ...
+    assert dump["clamped"] < calm["clamped"]
+    assert dump["components"]["macro_beta_headwind"] < 0
+    # ... exactly the configured maximum at full headwind.
+    assert abs(calm["clamped"] - dump["clamped"] - 18.0) < 0.01
+    # ... but the strongest relative performer still clears the entry gate.
+    assert dump["clamped"] >= 60.0
+
+
+def test_macro_beta_headwind_saturates_and_scales() -> None:
+    feats = _strong_long_features(rs_7d=30.0)
+    half = score(feats, trade_direction="LONG", macro_thrust=-1.5)   # half of 3%
+    full = score(feats, trade_direction="LONG", macro_thrust=-3.0)   # saturates
+    beyond = score(feats, trade_direction="LONG", macro_thrust=-9.0)  # no further cost
+    assert abs(full["clamped"] - beyond["clamped"]) < 1e-9
+    assert half["clamped"] > full["clamped"]
+    assert abs((half["clamped"] - full["clamped"]) - 9.0) < 0.01
+
+
+def test_a_marginal_long_still_cannot_enter_a_dump() -> None:
+    """The other half of the guarantee: pricing must not mean waving things through."""
+    weak = _strong_long_features(rs_7d=3.0)
+    dump = score(weak, trade_direction="LONG", macro_thrust=-3.0)
+    assert dump["clamped"] < 60.0
+
+
+def test_tailwind_is_not_penalised() -> None:
+    """A rising tape must not punish a long — the term is one-sided."""
+    feats = _strong_long_features(rs_7d=30.0)
+    calm = score(feats, trade_direction="LONG", macro_thrust=0.0)
+    up = score(feats, trade_direction="LONG", macro_thrust=+3.0)
+    assert "macro_beta_headwind" not in up["components"]
+    assert abs(up["clamped"] - calm["clamped"]) < 1e-9
+

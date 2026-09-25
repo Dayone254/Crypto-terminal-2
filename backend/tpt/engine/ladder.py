@@ -14,6 +14,100 @@ from tpt.engine.ws_memory import ws_memory
 
 LadderDict = dict[str, Any]
 
+
+def confirm_l2_structure(
+    symbol: str,
+    trade_direction: str,
+    entry_price: float,
+    l2_bids: list[list[Any]] | None = None,
+    l2_asks: list[list[Any]] | None = None,
+    min_wall_usd: float = 50_000.0,
+    proximity_pct: float = 0.02,
+) -> dict[str, Any]:
+    """Deterministic L2 confirmation gate — pure function. No agent/LLM logic.
+
+    Called unconditionally at signal finalization time whenever live or shadow
+    L2 data is available. Returns pass/fail result and structural details.
+    """
+    if entry_price <= 0:
+        return {
+            "passed": False,
+            "reason": "INVALID_ENTRY_PRICE",
+            "l2_volume_usd": 0.0,
+            "wall_price": None,
+        }
+
+    if trade_direction == "LONG":
+        if not l2_bids:
+            return {
+                "passed": False,
+                "reason": "NO_L2_BID_DATA",
+                "l2_volume_usd": 0.0,
+                "wall_price": None,
+            }
+        lower_bound = entry_price * (1.0 - proximity_pct)
+        upper_bound = entry_price * 1.005
+
+        matching_walls = [
+            (float(b[0]), float(b[1]) * float(b[0]))
+            for b in l2_bids
+            if len(b) >= 2 and lower_bound <= float(b[0]) <= upper_bound
+        ]
+        if not matching_walls:
+            return {
+                "passed": False,
+                "reason": "NO_BID_WALL_IN_RANGE",
+                "l2_volume_usd": 0.0,
+                "wall_price": None,
+            }
+        matching_walls.sort(key=lambda w: w[1], reverse=True)
+        best_price, max_vol_usd = matching_walls[0]
+        passed = max_vol_usd >= min_wall_usd
+
+        return {
+            "passed": passed,
+            "reason": f"BID_WALL_{'CONFIRMED' if passed else 'INSUFFICIENT'}"
+            f" (${max_vol_usd / 1000:,.0f}k at ${best_price:,.4f})",
+            "l2_volume_usd": round(max_vol_usd, 2),
+            "wall_price": round(best_price, 6),
+        }
+    else:
+        # SHORT
+        if not l2_asks:
+            return {
+                "passed": False,
+                "reason": "NO_L2_ASK_DATA",
+                "l2_volume_usd": 0.0,
+                "wall_price": None,
+            }
+        lower_bound = entry_price * 0.995
+        upper_bound = entry_price * (1.0 + proximity_pct)
+
+        matching_walls = [
+            (float(a[0]), float(a[1]) * float(a[0]))
+            for a in l2_asks
+            if len(a) >= 2 and lower_bound <= float(a[0]) <= upper_bound
+        ]
+        if not matching_walls:
+            return {
+                "passed": False,
+                "reason": "NO_ASK_WALL_IN_RANGE",
+                "l2_volume_usd": 0.0,
+                "wall_price": None,
+            }
+        matching_walls.sort(key=lambda w: w[1], reverse=True)
+        best_price, max_vol_usd = matching_walls[0]
+        passed = max_vol_usd >= min_wall_usd
+
+        return {
+            "passed": passed,
+            "reason": f"ASK_WALL_{'CONFIRMED' if passed else 'INSUFFICIENT'}"
+            f" (${max_vol_usd / 1000:,.0f}k at ${best_price:,.4f})",
+            "l2_volume_usd": round(max_vol_usd, 2),
+            "wall_price": round(best_price, 6),
+        }
+
+
 def compute_ladder(
     product_id: str,
     features: FeatureDict,
@@ -314,7 +408,8 @@ def compute_ladder(
     # calibrated, the measurement supersedes the constant.
     min_rr = 1.85
     if target_r and target_r > 0:
-        min_rr = min(min_rr, float(target_r))
+        # Enforce an absolute 1.0R floor even if calibration suggests lower
+        min_rr = max(1.0, min(min_rr, float(target_r)))
     if rr_a_t1 < min_rr and not pinned:
         return None
 

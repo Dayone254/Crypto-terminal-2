@@ -55,15 +55,15 @@ export const TelegramSettings: React.FC = () => {
     };
 
     return (
-        <div style={{ background: "#080A0F", borderRadius: 0, border: "none", overflow: "hidden" }}>
+        <div style={{ background: "var(--surface-3)", borderRadius: 0, border: "none", overflow: "hidden" }}>
 
-            <div style={{ background: "#0B0F19", padding: "1rem 1.25rem", borderBottom: "none", display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <div style={{ background: "var(--surface-1)", padding: "1rem 1.25rem", borderBottom: "none", display: "flex", alignItems: "center", gap: "0.6rem" }}>
                 <Bell size={16} color="var(--accent-cyan)" />
-                <h2 style={{ fontSize: "0.85rem", fontWeight: 800, margin: 0, color: "#E2E8F0", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                <h2 style={{ fontSize: "0.85rem", fontWeight: 800, margin: 0, color: "var(--text-2)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
                     Push Alerts
                 </h2>
                 {configured && (
-                    <span style={{ marginLeft: "auto", fontSize: "0.65rem", color: "#10B981", fontWeight: 700, background: "rgba(16,185,129,0.1)", padding: "0.2rem 0.5rem", borderRadius: 0, border: "none" }}>
+                    <span style={{ marginLeft: "auto", fontSize: "0.65rem", color: "var(--pos)", fontWeight: 700, background: "rgba(16,185,129,0.1)", padding: "0.2rem 0.5rem", borderRadius: 0, border: "none" }}>
                         ● ACTIVE
                     </span>
                 )}
@@ -88,7 +88,7 @@ export const TelegramSettings: React.FC = () => {
                             border: "none",
                             borderRadius: 0,
                             padding: "0.6rem 0.8rem",
-                            color: "#E2E8F0",
+                            color: "var(--text-2)",
                             fontSize: "0.8rem",
                             fontFamily: "var(--font-jetbrains)",
                             outline: "none",
@@ -112,7 +112,7 @@ export const TelegramSettings: React.FC = () => {
                             border: "none",
                             borderRadius: 0,
                             padding: "0.6rem 0.8rem",
-                            color: "#E2E8F0",
+                            color: "var(--text-2)",
                             fontSize: "0.8rem",
                             fontFamily: "var(--font-jetbrains)",
                             outline: "none",
@@ -130,7 +130,7 @@ export const TelegramSettings: React.FC = () => {
                             flex: 1,
                             background: "rgba(6,182,212,0.15)",
                             border: "none",
-                            color: "#06B6D4",
+                            color: "var(--info)",
                             padding: "0.6rem",
                             borderRadius: 0,
                             fontSize: "0.75rem",
@@ -152,7 +152,7 @@ export const TelegramSettings: React.FC = () => {
                             flex: 1,
                             background: "rgba(16,185,129,0.1)",
                             border: "none",
-                            color: "#10B981",
+                            color: "var(--pos)",
                             padding: "0.6rem",
                             borderRadius: 0,
                             fontSize: "0.75rem",
@@ -180,7 +180,7 @@ export const TelegramSettings: React.FC = () => {
                         background: status === "ok" ? "rgba(16,185,129,0.08)" : "rgba(244,63,94,0.08)",
                         border: `1px solid ${status === "ok" ? "rgba(16,185,129,0.2)" : "rgba(244,63,94,0.2)"}`,
                         fontSize: "0.75rem",
-                        color: status === "ok" ? "#10B981" : "#F43F5E",
+                        color: status === "ok" ? "var(--pos)" : "var(--neg)",
                     }}>
                         {status === "ok" ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
                         {message}

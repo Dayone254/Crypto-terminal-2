@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # Scanner
     scan_interval_seconds: int = 300
 
+    # Cost-tiered triage. A scan covers ~400 products; candle features cost four
+    # requests per symbol and order-book/futures enrichment costs more again. So
+    # instead of a hand-written blind pre-filter, the scanner scores every symbol
+    # cheaply first, spends its candle budget on the strongest candidates, then
+    # spends its enrichment budget on the strongest of those. Raise to spend more
+    # requests and lift coverage; lower to spend fewer.
+    candle_triage_top_k: int = 120
+    enrich_top_m: int = 40
+
     # Timezone
     display_tz: str = "Africa/Nairobi"
 
@@ -46,11 +55,14 @@ class Settings(BaseSettings):
     # roughly 512 file descriptors, so the subscription set is hard-capped.
     max_ws_subscriptions: int = 20
 
+    # Shadow Mode Staging: Minimum closed shadow sample threshold before promotion eligibility
+    min_shadow_sample_size: int = 30
+
     # Live WebSocket streaming (L2 depth + ticker). Requires an outbound network
     # path that permits WSS upgrades. When disabled, the scanner falls back to
     # the REST order-book snapshot and the /ws/* endpoints close immediately
     # rather than retrying handshakes forever.
-    enable_live_ws: bool = False
+    enable_live_ws: bool = True
 
     # Logging
     log_level: str = "INFO"
@@ -59,6 +71,12 @@ class Settings(BaseSettings):
     # Telegram (post-v1)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+
+    # Catalyst Intelligence — internet scraper for dev activity + news + volume surges
+    catalyst_scrape_interval_seconds: int = 900   # 15 minutes; set 0 to disable
+    coingecko_api_key: str = ""                   # Optional PRO key (unlocks higher rate limits)
+    cryptocompare_api_key: str = ""               # Free key from min-api.cryptocompare.com
+    catalyst_max_symbols: int = 60                # Max symbols per scrape cycle (API budget cap)
 
     @property
     def sqlite_path(self) -> str:

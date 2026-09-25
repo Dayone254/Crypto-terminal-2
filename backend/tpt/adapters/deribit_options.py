@@ -15,7 +15,7 @@ async def aggregate_options_board(underlying: str = "BTC") -> list[dict[str, Any
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=10.0)
+            response = await client.get(url, headers=headers, timeout=2.0)
             if response.status_code != 200:
                 logger.error(f"Deribit API error: HTTP {response.status_code}")
                 return []
@@ -36,6 +36,10 @@ async def aggregate_options_board(underlying: str = "BTC") -> list[dict[str, Any
                 strike = float(parts[2])
                 opt_type = parts[3]
                 
+                oi_coin = float(item.get("open_interest", 0) or 0)
+                px = float(item.get("underlying_price", 0) or 0)
+                oi_usd = oi_coin * px if px > 0 else oi_coin * 90000.0
+
                 board.append({
                     "symbol": sym,
                     "underlying": underlying,
@@ -44,10 +48,11 @@ async def aggregate_options_board(underlying: str = "BTC") -> list[dict[str, Any
                     "type": opt_type,
                     "bid_price": float(item.get("bid_price", 0) or 0),
                     "ask_price": float(item.get("ask_price", 0) or 0),
-                    "open_interest": float(item.get("open_interest", 0) or 0),
+                    "open_interest": oi_coin,
+                    "open_interest_usd": oi_usd,
                     "volume": float(item.get("volume", 0) or 0),
                     "mark_price": float(item.get("mark_price", 0) or 0),
-                    "underlying_price": float(item.get("underlying_price", 0) or 0),
+                    "underlying_price": px,
                     "implied_volatility": float(item.get("mark_iv", 0) or 0) / 100.0 # Deribit gives IV as percentage (e.g. 55.2% -> 0.552)
                 })
                 

@@ -56,10 +56,15 @@ def _excursion_summary(closed_rows: list[dict[str, Any]]) -> dict[str, Any]:
         exc = excursion_from_signal(row)
         if exc is None:
             continue
+        entry_val = row.get("entry_price")
+        stop_val = row.get("sl_price")
+        target_val = row.get("tp_price")
+        if entry_val is None or stop_val is None or target_val is None:
+            continue
         try:
-            entry = float(row.get("entry_price"))
-            stop = float(row.get("sl_price"))
-            target = float(row.get("tp_price"))
+            entry = float(entry_val)
+            stop = float(stop_val)
+            target = float(target_val)
         except (TypeError, ValueError):
             continue
         risk = abs(entry - stop)
@@ -85,11 +90,16 @@ def _excursion_summary(closed_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 @router.get("/stats")
-async def backtest_stats():
+async def backtest_stats(
+    pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0")
+):
     """Retrieve statistical edge performance."""
     try:
         async with get_connection() as conn:
-            async with conn.execute("SELECT status, COUNT(*) as cnt FROM signals GROUP BY status") as cursor:
+            where_clause = f"WHERE pipeline_version = '{pipeline_version}'" if pipeline_version else ""
+            where_and = f"AND pipeline_version = '{pipeline_version}'" if pipeline_version else ""
+
+            async with conn.execute(f"SELECT status, COUNT(*) as cnt FROM signals {where_clause} GROUP BY status") as cursor:
                 rows = await cursor.fetchall()
 
             counts = {"PENDING": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0, "ACTIVE_T2": 0, "PARTIAL_WIN": 0, "EXPIRED": 0}
@@ -101,16 +111,16 @@ async def backtest_stats():
             # Win rate counts profitable WIN vs LOSS. BREAK_EVEN and PARTIAL_WIN are excluded from directional edge.
             win_rate = (counts["WIN"] / directional_outcomes * 100) if directional_outcomes > 0 else 0.0
 
-            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} ORDER BY id DESC LIMIT 50") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and} ORDER BY id DESC LIMIT 50") as cursor:
                 recent_trades = [dict(r) for r in await cursor.fetchall()]
 
-            async with conn.execute("SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2') ORDER BY id DESC") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2') {where_and} ORDER BY id DESC") as cursor:
                 pending_trades = [dict(r) for r in await cursor.fetchall()]
 
             # All closed rows (not just the recent 50) feed the excursion summary
             # and the target estimate: the calibration is a property of the whole
             # ledger, and truncating it would bias the estimator.
-            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED}") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and}") as cursor:
                 closed_rows = [dict(r) for r in await cursor.fetchall()]
 
             return {
@@ -136,6 +146,7 @@ async def backtest_stats():
 async def list_trades(
     status: str = Query(None, description="Filter: PENDING | WIN | LOSS"),
     symbol: str = Query(None, description="Filter by symbol"),
+    pipeline_version: str = Query(None, description="Filter by pipeline iteration"),
     limit: int = Query(200, le=500),
 ):
     """Return full trade ledger with optional filters."""
@@ -149,6 +160,9 @@ async def list_trades(
             if symbol:
                 clauses.append("symbol = ?")
                 params.append(symbol.upper())
+            if pipeline_version:
+                clauses.append("pipeline_version = ?")
+                params.append(pipeline_version)
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             params.append(limit)
             async with conn.execute(
@@ -163,12 +177,15 @@ async def list_trades(
 
 
 @router.get("/symbols")
-async def symbol_breakdown():
+async def symbol_breakdown(
+    pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0")
+):
     """Return per-symbol win/loss/pending breakdown for the edge leaderboard."""
     try:
         async with get_connection() as conn:
+            where_clause = f"WHERE pipeline_version = '{pipeline_version}'" if pipeline_version else ""
             async with conn.execute(
-                """
+                f"""
                 SELECT
                     symbol,
                     SUM(CASE WHEN status = 'WIN'         THEN 1 ELSE 0 END) AS wins,
@@ -180,6 +197,7 @@ async def symbol_breakdown():
                     AVG(mfe) AS avg_mfe,
                     AVG(mae) AS avg_mae
                 FROM signals
+                {where_clause}
                 GROUP BY symbol
                 ORDER BY wins DESC, total DESC
                 LIMIT 50

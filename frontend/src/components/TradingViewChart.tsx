@@ -38,7 +38,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
             allow_symbol_change: true,
             calendar: false,
             support_host: "https://www.tradingview.com",
-            backgroundColor: "#080A0F",
+            backgroundColor: "var(--surface-3)",
             gridColor: "rgba(255, 255, 255, 0.04)",
             hide_side_toolbar: false,
             details: true,
@@ -59,7 +59,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
             style={{
                 width: "100%",
                 height: typeof height === "number" ? `${height}px` : height,
-                background: "#080A0F",
+                background: "var(--surface-3)",
                 border: "none",
                 borderRadius: 0,
                 overflow: "hidden",

@@ -1,28 +1,276 @@
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
 
 :root {
-  --bg-dark: #06080F;
-  --panel-bg: #0B0F19;
-  --panel-bg-subtle: #0E1424;
-  --panel-border: transparent;
-  --panel-border-glow: transparent;
-  --panel-hover: transparent;
+  /* ── PRO-CORE Institutional Color System ────────────────────────────────────*/
+  --surface-container-lowest: #0a0e15;
+  --surface-container-low: #181c23;
+  --surface-container: #1c2027;
+  --surface-container-high: #262a32;
+  --surface-container-highest: #31353d;
 
-  --text-main: #F8FAFC;
-  --text-muted: #94A3B8;
-  --text-dim: #64748B;
+  --primary-fixed-dim: #00e38f;
+  --primary-container: #00f59b;
+  --primary: #cdffdc;
+  --on-primary-container: #006b41;
+  --on-primary-fixed: #002111;
 
+  --secondary: #ffb2b7;
+  --secondary-container: #b50036;
+  --secondary-fixed: #ffdadb;
+
+  --tertiary-fixed-dim: #c0c1ff;
+  --tertiary-container: #d3d3ff;
+
+  --outline: #849588;
+  --outline-variant: #3b4a3f;
+  --on-surface: #dfe2ed;
+  --on-surface-variant: #b9cbbd;
+
+  /* ── Legacy Surface & Line Fallbacks ────────────────────────────────────────*/
+  --surface-0: var(--surface-container-lowest);
+  --surface-1: var(--surface-container-low);
+  --surface-2: var(--surface-container);
+  --surface-3: var(--surface-container-lowest);
+  --well: rgba(0, 0, 0, 0.5);
+
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --hover: rgba(255, 255, 255, 0.04);
+
+  --text-1: #dfe2ed;
+  --text-2: #c4c8d4;
+  --text-3: #b9cbbd;
+  --text-4: #849588;
+
+  --pos: var(--primary-fixed-dim);
+  --pos-bright: var(--primary-container);
+  --pos-soft: rgba(0, 227, 143, 0.12);
+  --pos-line: rgba(0, 227, 143, 0.25);
+
+  --neg: var(--secondary);
+  --neg-bright: #ffdadb;
+  --neg-soft: rgba(255, 178, 183, 0.12);
+  --neg-line: rgba(255, 178, 183, 0.25);
+
+  --neutral: var(--text-2);
+  --neutral-soft: rgba(196, 200, 212, 0.12);
+  --neutral-line: rgba(196, 200, 212, 0.25);
+
+  --warn: #f59e0b;
+  --info: #06b6d4;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-jetbrains: var(--font-mono);
+}
+
+/* ── Typography & Metric Utilities ──────────────────────────────────────────*/
+.font-headline-xl {
+  font-family: var(--font-sans);
+  font-size: 36px;
+  line-height: 44px;
+  font-weight: 700;
+}
+
+.font-headline-lg {
+  font-family: var(--font-sans);
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+}
+
+.font-headline-md {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.font-headline-sm {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.font-body-lg {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+}
+
+.font-body-md {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+}
+
+.font-body-sm {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+}
+
+.font-mono-metric-lg {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono-data-primary {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono-data-compact {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-label-caps {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+:root {
+  --text-strong: #FFFFFF;
+  /* rare, maximum emphasis */
+  --text-inverse: #000000;
+  /* text sitting on a bright fill (toast, copied state) */
+
+  /* A genuine three-step semantic ramp: the edge leaderboard's medal colours.
+     Worth real tokens — collapsing silver into bronze would destroy meaning. */
+  --rank-1: #F59E0B;
+  --rank-2: #94A3B8;
+  --rank-3: #CD7F32;
+
+  /* ── Semantic state ─────────────────────────────────────────────────────────
+     Named for meaning, not hue. A colour should encode exactly one thing —
+     direction or sentiment — never decoration. -bright for emphasis, -soft for
+     tint fills, -line for tinted borders. */
+  --pos: #10B981;
+  --pos-bright: #34D399;
+  --pos-soft: rgba(16, 185, 129, 0.10);
+  --pos-line: rgba(16, 185, 129, 0.35);
+
+  --neg: #F43F5E;
+  --neg-bright: #F87171;
+  --neg-soft: rgba(244, 63, 94, 0.10);
+  --neg-line: rgba(244, 63, 94, 0.35);
+
+  --warn: #F59E0B;
+  --warn-bright: #FBBF24;
+  --warn-soft: rgba(245, 158, 11, 0.10);
+  --warn-line: rgba(245, 158, 11, 0.35);
+  /* The 4th severity step. Coverage is a genuine four-step ramp (FULL / PARTIAL
+     / THIN / BLIND) and collapsing two of its steps would lose information, so
+     the ramp gets a real token instead of a hardcoded orange. */
+  --warn-deep: #F97316;
+  --warn-deep-soft: rgba(249, 115, 22, 0.10);
+  --warn-deep-line: rgba(249, 115, 22, 0.35);
+
+  --info: #06B6D4;
+  --info-soft: rgba(6, 182, 212, 0.10);
+  --info-line: rgba(6, 182, 212, 0.35);
+
+  --accent-sky: #38BDF8;
   --accent-blue: #3B82F6;
-  --accent-cyan: #06B6D4;
-  --accent-emerald: #10B981;
-  --accent-amber: #F59E0B;
-  --accent-rose: #F43F5E;
+  --accent-blue-bright: #60A5FA;
   --accent-purple: #A855F7;
+  --accent-purple-bright: #C084FC;
+  --purple-soft: rgba(168, 85, 247, 0.10);
 
-  --glow-emerald: rgba(16, 185, 129, 0.15);
-  --glow-amber: rgba(245, 158, 11, 0.15);
-  --glow-rose: rgba(244, 63, 94, 0.15);
-  --glow-cyan: rgba(6, 182, 212, 0.15);
+  /* ── Type ───────────────────────────────────────────────────────────────────
+     The app shipped 24 distinct font sizes between 0.55 and 1.8rem, of which 38%
+     of all text sat at or below 0.7rem (11.2px), with a floor of 8.8px. This is
+     the target scale; --fs-micro is the floor and nothing should go below it. */
+  --fs-micro: 0.5625rem;
+  /* 9px */
+  --fs-xs: 0.625rem;
+  /* 10px */
+  --fs-sm: 0.6875rem;
+  /* 11px */
+  --fs-base: 0.75rem;
+  /* 12px */
+  --fs-lg: 0.8125rem;
+  /* 13px */
+  --fs-xl: 1rem;
+  /* 16px */
+  --fs-2xl: 1.25rem;
+  /* 20px */
+
+  --font-sans: 'Inter',
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  --font-mono: 'JetBrains Mono',
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  /* Referenced 12 times across the app but never defined, so every
+     `font-family: var(--font-jetbrains)` declaration was invalid and silently
+     fell back — some text the app believed was monospaced was not. */
+  --font-jetbrains: var(--font-mono);
+
+  /* ── Space (4px rhythm) ─────────────────────────────────────────────────────*/
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.25rem;
+  --sp-6: 1.5rem;
+
+  /* ── Radius ─────────────────────────────────────────────────────────────────
+     Hard-edged is the house language and a good one; it needed to be one value
+     rather than the nine in use (0 along with 2/4/5/6/7/10/12px). */
+  --r-none: 0;
+  --r-sm: 3px;
+  --r-pill: 999px;
+
+  /* ── Motion & Design Engineering (Emil Kowalski principles) ─────────────────*/
+  --dur-fast: 120ms;
+  --dur-med: 200ms;
+  --dur-slow: 350ms;
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ── Back-compat aliases ────────────────────────────────────────────────────
+     Existing call sites keep working so the migration can be incremental rather
+     than a big-bang rewrite. It is these aliases that make the --text-4 contrast
+     fix land at all 90 --text-dim sites at once. New code should use the names
+     above. */
+  --bg-dark: var(--surface-0);
+  --panel-bg: var(--surface-1);
+  --panel-bg-subtle: var(--surface-2);
+  --panel-border: var(--line);
+  --panel-border-glow: transparent;
+  --panel-hover: var(--hover);
+  --text-main: var(--text-1);
+  --text-muted: var(--text-3);
+  --text-dim: var(--text-4);
+  --accent-emerald: var(--pos);
+  --accent-rose: var(--neg);
+  --accent-amber: var(--warn);
+  --accent-cyan: var(--info);
 }
 
 * {
@@ -32,9 +280,10 @@
 }
 
 body {
-  background-color: var(--bg-dark);
-  color: var(--text-main);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--surface-0);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
   min-height: 100vh;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -42,8 +291,34 @@ body {
 }
 
 .mono {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   letter-spacing: -0.02em;
+  /* Every number in this product ticks. Without tabular figures each digit has
+     its own advance width, so a price or a score re-lays out horizontally on each
+     update and the whole column twitches while you read it. Fixed-advance
+     numerals are the single highest-value line in the whole design pass. */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Respect the OS setting rather than animating regardless. */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Keyboard focus must be visible. The app had no focus style at all, so tabbing
+   through the icon buttons gave no indication of where you were. */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
 }
 
 /* Custom Scrollbar */
@@ -170,12 +445,16 @@ body {
   border-radius: 0;
   border: none;
   cursor: pointer;
-  transition: all 0s;
+  transition: transform var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
   box-shadow: none;
 }
 
 .btn-primary:hover {
   background: #2563EB;
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .btn-primary:disabled {
@@ -204,11 +483,16 @@ body {
   font-size: 0.75rem;
   font-weight: 800;
   cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
 .tab-btn:hover {
   color: var(--text-main);
   background: rgba(255, 255, 255, 0.06);
+}
+
+.tab-btn:active {
+  transform: scale(0.96);
 }
 
 .tab-btn.active {
@@ -247,18 +531,22 @@ body {
   padding: 0.75rem 1rem;
   border-bottom: none;
   vertical-align: middle;
-  transition: all 0.15s ease;
+  transition: all 0.15s var(--ease-out);
 }
 
 .scanner-table tbody tr {
   cursor: pointer;
-  transition: background 0.15s ease, border-left 0.15s ease;
+  transition: background 0.15s var(--ease-out), transform 0.12s var(--ease-out);
   border-left: none;
 }
 
 .scanner-table tbody tr:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.04);
   border-left: none;
+}
+
+.scanner-table tbody tr:active {
+  transform: scale(0.996);
 }
 
 /* Label badges */
@@ -270,6 +558,11 @@ body {
   font-weight: 800;
   letter-spacing: 0.04em;
   font-family: 'JetBrains Mono', monospace;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.label-badge:hover {
+  transform: scale(1.03);
 }
 
 .label-badge.ENTRY_ZONE {
@@ -320,7 +613,7 @@ body {
 .pir-bar-fill {
   height: 100%;
   border-radius: 3px;
-  transition: width 0.3s ease;
+  transition: width 0.3s var(--ease-out);
 }
 
 /* Drawer */
@@ -332,6 +625,17 @@ body {
   z-index: 100;
   display: flex;
   justify-content: flex-end;
+  animation: fadeIn var(--dur-med) var(--ease-out);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .drawer-content {
@@ -345,16 +649,18 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
-  animation: slideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: slideIn var(--dur-med) var(--ease-out);
 }
 
 @keyframes slideIn {
   from {
-    transform: translateX(100%);
+    opacity: 0;
+    transform: translateX(100%) scale(0.98);
   }
 
   to {
-    transform: translateX(0);
+    opacity: 1;
+    transform: translateX(0) scale(1);
   }
 }
 
@@ -377,25 +683,208 @@ body {
   position: fixed;
   bottom: 2rem;
   right: 2rem;
-  background: #10B981;
+  background: var(--pos);
   color: #000;
   font-weight: 800;
-  padding: 0.65rem 1.2rem;
-  border-radius: 0;
+  padding: var(--sp-3) var(--sp-5);
+  border-radius: var(--r-none);
   border: none;
   box-shadow: none;
   z-index: 200;
-  animation: popIn 0.2s ease;
+  animation: popIn var(--dur-med) var(--ease-out);
 }
 
 @keyframes popIn {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(8px) scale(0.96);
   }
 
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
+}
+
+/* ── Asset detail layout ─────────────────────────────────────────────────────
+   The detail grid was a fixed `1fr 1fr 1.5fr 1fr` with no breakpoints at all, so
+   on anything narrower than a wide desktop the L2 ladder — ten levels of depth —
+   was crushed into the narrowest column, and below ~1200px all four columns
+   squashed rather than reflowing. The order below keeps the chart and the
+   decision panels first when it collapses. */
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr 1.3fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+@media (max-width: 1600px) {
+  .detail-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 1000px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Loading skeleton ───────────────────────────────────────────────────────
+   `loading` was tracked in component state and never rendered, so a cold fetch
+   showed a half-empty page with "Computing order targets…" in one panel. */
+.skeleton {
+  background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0.04) 25%,
+      rgba(255, 255, 255, 0.09) 37%,
+      rgba(255, 255, 255, 0.04) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+/* ── Honest empty state ─────────────────────────────────────────────────────
+   Used where the page previously invented data instead of admitting a gap: a
+   symbol the scanner never scored, or one with no ladder. */
+.empty-state {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  background: var(--warn-soft);
+  border-left: 2px solid var(--warn);
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  line-height: 1.55;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PRIMITIVES  —  the substrate for the `ui/` components.
+   Everything here earns its place by needing a pseudo-state (hover/focus) or a
+   shared rhythm that inline styles cannot express. This is not a second styling
+   system running alongside the tokens; it is the part of one that has to be CSS.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The fundamental container. Panels used to re-declare
+   `background:"#0b0f19", border:"none", borderRadius:0` inline at every call
+   site, which is precisely how the surface palette drifted to six values. */
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-none);
+}
+
+/* For a panel nested inside another panel, where a second hairline is noise. */
+.panel--flush {
+  border-color: transparent;
+}
+
+.panel--inset {
+  background: var(--surface-3);
+}
+
+/* The uppercase micro-label that sits above every group of figures. */
+.sec-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-micro);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+/* Buttons: a real reset plus a hover/focus contract, so the same control looks
+   and behaves the same everywhere instead of being restyled per call site. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-none);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.btn:hover {
+  background: var(--hover);
+  border-color: var(--line-strong);
+  color: var(--text-1);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn--icon {
+  padding: var(--sp-2);
+}
+
+.btn--info {
+  background: var(--info-soft);
+  border-color: var(--info-line);
+  color: var(--info);
+}
+
+.btn--pos {
+  background: var(--pos-soft);
+  border-color: var(--pos-line);
+  color: var(--pos);
+}
+
+/* Data-table row hover, which inline styles cannot express. */
+.row-hover {
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.row-hover:hover {
+  background: var(--hover);
+}
+
+/* An inset region — code block, chart canvas, nested readout. */
+.well {
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}
+
+/* ── Responsive primitives ──────────────────────────────────────────────────
+   The app had two media queries in total. These are the two structural ones
+   every screen needs; page-specific breakpoints build on them. */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+
+@media (max-width: 900px) {
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.readout {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
 }

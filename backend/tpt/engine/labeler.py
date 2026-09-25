@@ -2,6 +2,14 @@
 
 Determines exact single primary label using ordered priority tree (SKIP → CHASE → ENTRY_ZONE → COILED → EARLY → WATCH)
 and secondary tags dict.
+
+The EARLY label fires for:
+  1. Classical early breakout:  day_change in [early_change_min, chase_change) with pos_in_range < early_pos_max.
+  2. Pre-breakout coil:         BB squeeze (bb_width_1h < BB_SQUEEZE_THRESH) + volume surge
+                                (volume_ratio_1h >= VOL_SURGE_RATIO) while price is still flat
+                                (-1% < day_change < early_change_min) AND either RS_1H outperformance
+                                or L2 buy-wall absorption is confirmed. This catches coins before
+                                the 5%+ expansion candle forms.
 """
 from __future__ import annotations
 
@@ -11,6 +19,14 @@ from tpt.config.strategy import LabelingConfig
 from tpt.engine.features import FeatureDict
 
 Label = Literal["SKIP", "CHASE", "ENTRY_ZONE", "COILED", "EARLY", "WATCH"]
+
+# Pre-breakout coil detection constants
+# A Bollinger Band width below this on the 1h is a confirmed volatility squeeze.
+BB_SQUEEZE_THRESH = 0.04
+# Volume ratio (current / SMA-20) above this signals an early-stage expansion burst.
+VOL_SURGE_RATIO = 2.0
+# 1h relative strength vs BTC that confirms stealth institutional accumulation.
+RS_1H_LEAD_MIN = 1.5
 
 
 def compute_tags(
@@ -60,6 +76,18 @@ def compute_tags(
         tags.append("L2_BUY_WALL_SUPPORT")
     if l2_sell_vol is not None and float(l2_sell_vol) >= 100_000.0:
         tags.append("L2_SELL_WALL_REJECTION")
+
+    # Pre-Breakout Coil Squeeze tag — BB compression + volume expansion
+    bb_width = features.get("bb_width_1h")
+    vol_ratio = features.get("volume_ratio_1h")
+    if (
+        bb_width is not None
+        and float(bb_width) > 0.0
+        and float(bb_width) < BB_SQUEEZE_THRESH
+        and vol_ratio is not None
+        and float(vol_ratio) >= VOL_SURGE_RATIO
+    ):
+        tags.append("COIL_SQUEEZE")
 
     return tags
 
@@ -158,8 +186,32 @@ def label(
         if coiled_change_low <= day_change <= coiled_change_high and coiled_pos_low <= pos_in_range <= coiled_pos_high:
             return "COILED"
 
-        # 5. EARLY
+        # 5. EARLY — two detection paths:
+        #    A) Classical: price already started moving (day_change > early_change_min)
+        #    B) Pre-breakout coil: price still flat but a volatility squeeze + volume
+        #       surge + institutional confirmation (RS 1h lead OR L2 bid absorption)
+        #       signals an imminent +5%+ expansion leg.
         if day_change > early_change_min and pos_in_range < early_pos_max:
+            return "EARLY"
+
+        bb_width = features.get("bb_width_1h")
+        vol_ratio = features.get("volume_ratio_1h")
+        rs_1h = features.get("rs_vs_btc_1h")
+        l2_buy = features.get("l2_buy_vol_2pct")
+
+        is_bb_squeeze = (
+            bb_width is not None
+            and float(bb_width) > 0.0
+            and float(bb_width) < BB_SQUEEZE_THRESH
+        )
+        is_vol_surge = vol_ratio is not None and float(vol_ratio) >= VOL_SURGE_RATIO
+        is_rs_leading = rs_1h is not None and float(rs_1h) >= RS_1H_LEAD_MIN
+        is_l2_absorbed = l2_buy is not None and float(l2_buy) >= 150_000.0
+
+        # Price still in coil zone but not yet moved (avoids re-flagging COILED setups)
+        in_pre_breakout_range = -1.0 <= day_change < early_change_min
+
+        if is_bb_squeeze and is_vol_surge and in_pre_breakout_range and (is_rs_leading or is_l2_absorbed):
             return "EARLY"
 
     # 6. WATCH

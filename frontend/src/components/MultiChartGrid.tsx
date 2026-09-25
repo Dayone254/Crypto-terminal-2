@@ -37,7 +37,7 @@ const SymbolPicker: React.FC<SymbolPickerProps> = ({ current, candidates, onChan
     return (
         <div style={{
             position: "absolute", top: "3rem", left: "0.5rem", zIndex: 100,
-            background: "#0B0F19", border: "none",
+            background: "var(--surface-1)", border: "none",
             borderRadius: 0, padding: "0.75rem", width: "220px",
             boxShadow: "0 20px 40px rgba(0,0,0,0.7)",
         }}>
@@ -48,7 +48,7 @@ const SymbolPicker: React.FC<SymbolPickerProps> = ({ current, candidates, onChan
                     value={query}
                     onChange={e => setQuery(e.target.value)}
                     placeholder="Search symbol..."
-                    style={{ background: "transparent", border: "none", outline: "none", color: "#E2E8F0", fontSize: "0.8rem", flex: 1 }}
+                    style={{ background: "transparent", border: "none", outline: "none", color: "var(--text-2)", fontSize: "0.8rem", flex: 1 }}
                 />
             </div>
             <div style={{ maxHeight: "220px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "2px" }}>
@@ -58,7 +58,7 @@ const SymbolPicker: React.FC<SymbolPickerProps> = ({ current, candidates, onChan
                         onClick={() => { onChange(c.product_id); onClose(); }}
                         style={{
                             background: c.product_id === current ? "rgba(6,182,212,0.1)" : "transparent",
-                            border: "none", color: c.product_id === current ? "#06B6D4" : "#E2E8F0",
+                            border: "none", color: c.product_id === current ? "var(--info)" : "var(--text-2)",
                             padding: "0.4rem 0.5rem", borderRadius: 0, textAlign: "left",
                             cursor: "pointer", fontSize: "0.78rem", fontWeight: 700,
                             display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -92,7 +92,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ panel, index, candidates, onSym
             {/* Panel Header */}
             <div style={{
                 display: "flex", alignItems: "center", justifyContent: "space-between",
-                padding: "0.6rem 0.75rem", background: "#0B0F19",
+                padding: "0.6rem 0.75rem", background: "var(--surface-1)",
                 borderBottom: "none",
                 borderTopLeftRadius: 0, borderTopRightRadius: 0,
                 flexShrink: 0,
@@ -101,7 +101,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ panel, index, candidates, onSym
                     onClick={() => setPickerOpen(v => !v)}
                     style={{
                         background: "rgba(255,255,255,0.04)", border: "none",
-                        color: "#E2E8F0", padding: "0.25rem 0.6rem", borderRadius: 0,
+                        color: "var(--text-2)", padding: "0.25rem 0.6rem", borderRadius: 0,
                         cursor: "pointer", fontWeight: 800, fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "0.4rem",
                     }}
                 >
@@ -112,10 +112,10 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ panel, index, candidates, onSym
                 {candidate && (
                     <div style={{ display: "flex", gap: "0.6rem", fontSize: "0.65rem" }}>
                         <span style={{ color: "var(--text-dim)" }}>SCORE</span>
-                        <span style={{ color: "#06B6D4", fontWeight: 800 }}>{candidate.composite_score?.toFixed(0)}</span>
+                        <span style={{ color: "var(--info)", fontWeight: 800 }}>{candidate.composite_score?.toFixed(0)}</span>
                         <span style={{
                             background: candidate.label === "ENTRY_ZONE" ? "rgba(16,185,129,0.2)" : "rgba(6,182,212,0.1)",
-                            color: candidate.label === "ENTRY_ZONE" ? "#10B981" : "#06B6D4",
+                            color: candidate.label === "ENTRY_ZONE" ? "var(--pos)" : "var(--info)",
                             padding: "0.1rem 0.4rem", borderRadius: 0, fontWeight: 800,
                         }}>
                             {candidate.label}
