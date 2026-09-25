@@ -419,6 +419,10 @@ export const NativeChart: React.FC<NativeChartProps> = ({
     useEffect(() => {
         if (!chartContainerRef.current) return;
 
+        // Reset candle refs whenever symbol or timeframe (granularity) changes
+        oldestCandleRef.current = null;
+        lastCandleRef.current = null;
+
         // Initialize klinecharts v10
         const chart = init(chartContainerRef.current, {
             styles: {
@@ -696,15 +700,20 @@ export const NativeChart: React.FC<NativeChartProps> = ({
 
         chart.removeOverlay();
 
+        const dataList = chart.getDataList();
+        // Guard: Do NOT draw overlays before candles are loaded into klinecharts.
+        // Creating overlays on an empty chart forces klinecharts to stretch scale domain
+        // into the future, squishing candles into a single vertical line.
+        if (!dataList || dataList.length < 2) return;
+
         const activeTrancheA = ladder?.tranche_a_price || entryLevel;
         const activeTrancheB = ladder?.tranche_b_price;
         const activeSL = ladder?.stop_price || slLevel;
         const activeTP1 = ladder?.target_1_price || tpLevel;
         const activeTP2 = ladder?.target_2_price;
 
-        const dataList = chart.getDataList();
-        const lastCandle = dataList && dataList.length > 0 ? dataList[dataList.length - 1] : null;
-        const lastTs = lastCandle ? lastCandle.timestamp : Date.now();
+        const lastCandle = dataList[dataList.length - 1];
+        const lastTs = lastCandle.timestamp;
 
         const isShort = (activeSL && activeTrancheA && activeSL > activeTrancheA) || tradeDirection === "SHORT";
         const mainTP = (activeTP2 && activeTP2 > 0) ? activeTP2 : (activeTP1 || tpLevel);

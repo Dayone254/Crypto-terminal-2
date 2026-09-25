@@ -351,7 +351,7 @@ async def get_market_candles(
     now_ts = int(datetime.now(UTC).timestamp())
 
     # ── 1. Live market candles (initial load without before_ts) ───────────
-    tf_map = {900: "15m", 3600: "1h", 21600: "6h", 86400: "1d"}
+    tf_map = {900: "15m", 3600: "1h", 14400: "4h", 21600: "6h", 86400: "1d"}
     interval = tf_map.get(granularity, "1h")
 
     if not before_ts:
@@ -365,12 +365,13 @@ async def get_market_candles(
         except Exception:
             pass
 
-        # Coinbase REST fallback
+        # Coinbase REST fallback (Coinbase valid granularities: 60, 300, 900, 3600, 21600, 86400)
+        cb_granularity = 3600 if granularity == 14400 else granularity
         try:
             cb_adapter = CoinbaseAdapter()
             cb_candles = await cb_adapter.get_candles(
                 product_id=sym if "-" in sym else f"{sym}-USD",
-                granularity=granularity,
+                granularity=cb_granularity,
                 limit=min(limit, 300)
             )
             if cb_candles:
