@@ -109,3 +109,16 @@ def test_persist_rejected_signals_row():
         assert rows[0][0] == "SOL-USD"
         assert rows[0][1] == "L2_REJECTED"
         assert "NO_L2_BID_DATA" in rows[0][2]
+
+
+def test_confirm_l2_structure_dynamic_altcoin_soft_mode():
+    """Soft mode: Allows setup when L2 orderbook data is missing or thin for altcoin."""
+    res_no_data = confirm_l2_structure("ALT-USD", "LONG", 10.0, l2_bids=None, soft_mode=True)
+    assert res_no_data["passed"] is True
+    assert res_no_data["reason"] == "L2_DATA_UNAVAILABLE_SOFT_PASS"
+
+    # Low volume altcoin ($1M 24h vol) with $6k bid wall (passes $5k dynamic threshold)
+    l2_bids = [[9.9, 608.0]]  # $6,019 USD
+    res_alt = confirm_l2_structure("ALT-USD", "LONG", 10.0, l2_bids=l2_bids, quote_vol_24h=1_000_000.0)
+    assert res_alt["passed"] is True
+    assert "BID_WALL_CONFIRMED" in res_alt["reason"]

@@ -102,9 +102,13 @@ async def backtest_stats(
             async with conn.execute(f"SELECT status, COUNT(*) as cnt FROM signals {where_clause} GROUP BY status") as cursor:
                 rows = await cursor.fetchall()
 
-            counts = {"PENDING": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0, "ACTIVE_T2": 0, "PARTIAL_WIN": 0, "EXPIRED": 0}
+            counts = {
+                "PENDING": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0,
+                "ACTIVE_T2": 0, "PARTIAL_WIN": 0, "EXPIRED": 0, "L2_REJECTED": 0,
+            }
             for r in rows:
-                counts[r["status"]] = r["cnt"]
+                if r["status"] in counts:
+                    counts[r["status"]] = r["cnt"]
 
             total_closed = counts["WIN"] + counts["LOSS"] + counts["BREAK_EVEN"] + counts["PARTIAL_WIN"]
             directional_outcomes = counts["WIN"] + counts["LOSS"]
@@ -132,6 +136,8 @@ async def backtest_stats(
                 "partial_wins": counts["PARTIAL_WIN"],
                 "pending_count": counts["PENDING"] + counts["ACTIVE_T2"],
                 "expired_count": counts.get("EXPIRED", 0),
+                "l2_rejected_count": counts.get("L2_REJECTED", 0),
+                "counts": counts,
                 "excursion": _excursion_summary(closed_rows),
                 "target_estimate": calibrate_targets(closed_rows).as_dict(),
                 "recent": recent_trades,
@@ -144,7 +150,7 @@ async def backtest_stats(
 
 @router.get("/trades")
 async def list_trades(
-    status: str = Query(None, description="Filter: PENDING | WIN | LOSS"),
+    status: str = Query(None, description="Filter: PENDING | WIN | LOSS | ACTIVE_T2 | PARTIAL_WIN | BREAK_EVEN | EXPIRED | L2_REJECTED"),
     symbol: str = Query(None, description="Filter by symbol"),
     pipeline_version: str = Query(None, description="Filter by pipeline iteration"),
     limit: int = Query(200, le=500),
@@ -154,7 +160,7 @@ async def list_trades(
         async with get_connection() as conn:
             clauses = []
             params: list[Any] = []
-            if status:
+            if status and status.upper() != "ALL":
                 clauses.append("status = ?")
                 params.append(status.upper())
             if symbol:

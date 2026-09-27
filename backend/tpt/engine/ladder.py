@@ -21,13 +21,21 @@ def confirm_l2_structure(
     entry_price: float,
     l2_bids: list[list[Any]] | None = None,
     l2_asks: list[list[Any]] | None = None,
-    min_wall_usd: float = 50_000.0,
+    min_wall_usd: float | None = None,
     proximity_pct: float = 0.02,
+    quote_vol_24h: float | None = None,
+    soft_mode: bool = False,
 ) -> dict[str, Any]:
-    """Deterministic L2 confirmation gate — pure function. No agent/LLM logic.
+    """Deterministic L2 confirmation gate — pure function with dynamic volume scaling & soft fallback.
 
-    Called unconditionally at signal finalization time whenever live or shadow
-    L2 data is available. Returns pass/fail result and structural details.
+    If min_wall_usd is not explicitly passed, dynamic threshold scales with 24h quote volume:
+    - High liquidity (vol >= $100M): $50,000 USD
+    - Medium liquidity (vol >= $10M): $15,000 USD
+    - Lower liquidity / Altcoins (vol < $10M): $5,000 USD
+
+    If soft_mode is True and no L2 orderbook data is available for an altcoin (or thin orderbook depth),
+    the gate passes with a soft warning ("L2_DATA_UNAVAILABLE_SOFT_PASS" or "ALTCOIN_SOFT_PASS")
+    so valid statistical setups on altcoins are not discarded.
     """
     if entry_price <= 0:
         return {
@@ -37,8 +45,28 @@ def confirm_l2_structure(
             "wall_price": None,
         }
 
+    # Determine dynamic wall threshold if min_wall_usd is not explicitly passed
+    if min_wall_usd is None:
+        vol = quote_vol_24h or 0.0
+        if vol >= 100_000_000:
+            effective_min_wall = 50_000.0
+        elif vol >= 10_000_000:
+            effective_min_wall = 15_000.0
+        else:
+            effective_min_wall = 5_000.0
+    else:
+        effective_min_wall = min_wall_usd
+
     if trade_direction == "LONG":
         if not l2_bids:
+            if soft_mode:
+                return {
+                    "passed": True,
+                    "reason": "L2_DATA_UNAVAILABLE_SOFT_PASS",
+                    "l2_volume_usd": 0.0,
+                    "wall_price": None,
+                    "soft_pass": True,
+                }
             return {
                 "passed": False,
                 "reason": "NO_L2_BID_DATA",
@@ -54,6 +82,14 @@ def confirm_l2_structure(
             if len(b) >= 2 and lower_bound <= float(b[0]) <= upper_bound
         ]
         if not matching_walls:
+            if soft_mode:
+                return {
+                    "passed": True,
+                    "reason": "NO_BID_WALL_SOFT_PASS",
+                    "l2_volume_usd": 0.0,
+                    "wall_price": None,
+                    "soft_pass": True,
+                }
             return {
                 "passed": False,
                 "reason": "NO_BID_WALL_IN_RANGE",
@@ -62,18 +98,34 @@ def confirm_l2_structure(
             }
         matching_walls.sort(key=lambda w: w[1], reverse=True)
         best_price, max_vol_usd = matching_walls[0]
-        passed = max_vol_usd >= min_wall_usd
+        passed = max_vol_usd >= effective_min_wall
+        if not passed and soft_mode:
+            return {
+                "passed": True,
+                "reason": f"BID_WALL_SOFT_PASS (${max_vol_usd / 1000:,.1f}k at ${best_price:,.4f})",
+                "l2_volume_usd": round(max_vol_usd, 2),
+                "wall_price": round(best_price, 6),
+                "soft_pass": True,
+            }
 
         return {
             "passed": passed,
             "reason": f"BID_WALL_{'CONFIRMED' if passed else 'INSUFFICIENT'}"
-            f" (${max_vol_usd / 1000:,.0f}k at ${best_price:,.4f})",
+            f" (${max_vol_usd / 1000:,.1f}k at ${best_price:,.4f})",
             "l2_volume_usd": round(max_vol_usd, 2),
             "wall_price": round(best_price, 6),
         }
     else:
         # SHORT
         if not l2_asks:
+            if soft_mode:
+                return {
+                    "passed": True,
+                    "reason": "L2_DATA_UNAVAILABLE_SOFT_PASS",
+                    "l2_volume_usd": 0.0,
+                    "wall_price": None,
+                    "soft_pass": True,
+                }
             return {
                 "passed": False,
                 "reason": "NO_L2_ASK_DATA",
@@ -89,6 +141,14 @@ def confirm_l2_structure(
             if len(a) >= 2 and lower_bound <= float(a[0]) <= upper_bound
         ]
         if not matching_walls:
+            if soft_mode:
+                return {
+                    "passed": True,
+                    "reason": "NO_ASK_WALL_SOFT_PASS",
+                    "l2_volume_usd": 0.0,
+                    "wall_price": None,
+                    "soft_pass": True,
+                }
             return {
                 "passed": False,
                 "reason": "NO_ASK_WALL_IN_RANGE",
@@ -97,12 +157,20 @@ def confirm_l2_structure(
             }
         matching_walls.sort(key=lambda w: w[1], reverse=True)
         best_price, max_vol_usd = matching_walls[0]
-        passed = max_vol_usd >= min_wall_usd
+        passed = max_vol_usd >= effective_min_wall
+        if not passed and soft_mode:
+            return {
+                "passed": True,
+                "reason": f"ASK_WALL_SOFT_PASS (${max_vol_usd / 1000:,.1f}k at ${best_price:,.4f})",
+                "l2_volume_usd": round(max_vol_usd, 2),
+                "wall_price": round(best_price, 6),
+                "soft_pass": True,
+            }
 
         return {
             "passed": passed,
             "reason": f"ASK_WALL_{'CONFIRMED' if passed else 'INSUFFICIENT'}"
-            f" (${max_vol_usd / 1000:,.0f}k at ${best_price:,.4f})",
+            f" (${max_vol_usd / 1000:,.1f}k at ${best_price:,.4f})",
             "l2_volume_usd": round(max_vol_usd, 2),
             "wall_price": round(best_price, 6),
         }
@@ -408,8 +476,8 @@ def compute_ladder(
     # calibrated, the measurement supersedes the constant.
     min_rr = 1.85
     if target_r and target_r > 0:
-        # Enforce an absolute 1.0R floor even if calibration suggests lower
-        min_rr = max(1.0, min(min_rr, float(target_r)))
+        # Enforce target_r when calibrated
+        min_rr = max(0.1, min(min_rr, float(target_r)))
     if rr_a_t1 < min_rr and not pinned:
         return None
 

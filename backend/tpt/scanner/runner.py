@@ -672,6 +672,7 @@ async def _execute_scan(
                         entry_price=san["tranche_a_price"],
                         l2_bids=l2_bids,
                         l2_asks=l2_asks,
+                        quote_vol_24h=feats.get("quote_vol_24h"),
                     )
                     score_dict["l2_gate_result"] = l2_gate_res
 

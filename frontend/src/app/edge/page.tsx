@@ -44,6 +44,8 @@ interface TargetEstimate {
 interface Stats {
     win_rate: number; total_closed: number; wins: number;
     losses: number; pending_count: number;
+    expired_count?: number; l2_rejected_count?: number;
+    counts?: Record<string, number>;
     excursion: Excursion;
     target_estimate: TargetEstimate;
 }
@@ -51,7 +53,7 @@ interface Stats {
 interface Trade {
     id: number; symbol: string; timestamp: number; score: number;
     label: string; entry_price: number; tp_price: number; sl_price: number;
-    status: "WIN" | "LOSS" | "PENDING" | "PARTIAL_WIN" | "BREAK_EVEN" | "ACTIVE_T2"; mfe: number; mae: number;
+    status: "WIN" | "LOSS" | "PENDING" | "PARTIAL_WIN" | "BREAK_EVEN" | "ACTIVE_T2" | "EXPIRED" | "L2_REJECTED"; mfe: number; mae: number;
     closed_at: number | null; filled_at: number | null; fill_price: number | null;
 }
 
@@ -71,6 +73,8 @@ const statusStyle = (status: string, filled: boolean): React.CSSProperties => ({
     LOSS: { color: "var(--neg)", background: "rgba(244,63,94,0.12)", border: "none" },
     BREAK_EVEN: { color: "var(--text-3)", background: "rgba(148,163,184,0.12)", border: "none" },
     ACTIVE_T2: { color: "var(--accent-blue)", background: "rgba(59,130,246,0.12)", border: "none" },
+    EXPIRED: { color: "var(--text-dim)", background: "rgba(100,116,139,0.15)", border: "none" },
+    L2_REJECTED: { color: "#f87171", background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.3)" },
     // PENDING splits into WAITING (no fill) vs IN TRADE (filled, hunting T1)
     PENDING: filled
         ? { color: "var(--warn)", background: "rgba(245,158,11,0.18)", border: "1px solid rgba(245,158,11,0.4)" }
@@ -80,6 +84,7 @@ const statusStyle = (status: string, filled: boolean): React.CSSProperties => ({
 const statusLabel = (status: string, filled: boolean): string => ({
     WIN: "WIN ✓", PARTIAL_WIN: "PARTIAL WIN", LOSS: "LOSS ✗",
     BREAK_EVEN: "BREAK EVEN", ACTIVE_T2: "ACTIVE T2 →",
+    EXPIRED: "EXPIRED ⌛", L2_REJECTED: "L2 REJECTED ⛔",
     PENDING: filled ? "IN TRADE ▶" : "WAITING",
 }[status] ?? status);
 
@@ -302,23 +307,45 @@ export default function EdgePage() {
 
                     {/* Filters — only show on trades tab */}
                     {activeTab === "trades" && (
-                        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                            {["ALL", "PENDING", "ACTIVE_T2", "WIN", "PARTIAL_WIN", "LOSS", "BREAK_EVEN"].map(s => (
-                                <button key={s} onClick={() => setFilterStatus(s)} style={{
-                                    padding: "0.35rem 0.7rem", borderRadius: "6px", border: "1px solid",
-                                    fontWeight: 800, fontSize: "0.68rem", cursor: "pointer",
-                                    background: filterStatus === s ? "rgba(6,182,212,0.1)" : "transparent",
-                                    borderColor: filterStatus === s ? "rgba(6,182,212,0.35)" : "var(--panel-border)",
-                                    color: filterStatus === s ? "var(--info)" : "var(--text-dim)",
-                                }}>
-                                    {s === "PENDING" ? "PENDING (Tagged)" : s === "ACTIVE_T2" ? "ACTIVE T2" : s}
-                                </button>
-                            ))}
+                        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+                            {[
+                                { id: "ALL", label: "ALL" },
+                                { id: "PENDING", label: "PENDING (Tagged)" },
+                                { id: "ACTIVE_T2", label: "ACTIVE T2" },
+                                { id: "WIN", label: "WIN" },
+                                { id: "PARTIAL_WIN", label: "PARTIAL_WIN" },
+                                { id: "LOSS", label: "LOSS" },
+                                { id: "BREAK_EVEN", label: "BREAK_EVEN" },
+                                { id: "EXPIRED", label: "EXPIRED" },
+                                { id: "L2_REJECTED", label: "L2 REJECTED" },
+                            ].map(tab => {
+                                const cnt = tab.id === "ALL" ? null : stats?.counts?.[tab.id] ?? null;
+                                return (
+                                    <button key={tab.id} onClick={() => setFilterStatus(tab.id)} style={{
+                                        padding: "0.35rem 0.65rem", borderRadius: "6px", border: "1px solid",
+                                        fontWeight: 800, fontSize: "0.68rem", cursor: "pointer", display: "flex", alignItems: "center", gap: "0.35rem",
+                                        background: filterStatus === tab.id ? (tab.id === "L2_REJECTED" ? "rgba(239,68,68,0.15)" : "rgba(6,182,212,0.1)") : "transparent",
+                                        borderColor: filterStatus === tab.id ? (tab.id === "L2_REJECTED" ? "rgba(239,68,68,0.4)" : "rgba(6,182,212,0.35)") : "var(--panel-border)",
+                                        color: filterStatus === tab.id ? (tab.id === "L2_REJECTED" ? "#f87171" : "var(--info)") : "var(--text-dim)",
+                                    }}>
+                                        <span>{tab.label}</span>
+                                        {cnt !== null && (
+                                            <span style={{
+                                                fontSize: "0.6rem", padding: "0.05rem 0.3rem", borderRadius: "4px",
+                                                background: filterStatus === tab.id ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.06)",
+                                                color: "var(--text-2)"
+                                            }}>
+                                                {cnt}
+                                            </span>
+                                        )}
+                                    </button>
+                                );
+                            })}
                             <input
                                 type="text" placeholder="Filter symbol..."
                                 value={filterSymbol}
                                 onChange={e => setFilterSymbol(e.target.value.toUpperCase())}
-                                style={{ background: "rgba(255,255,255,0.04)", border: "none", borderRadius: "6px", padding: "0.35rem 0.7rem", color: "var(--text-2)", fontSize: "0.75rem", outline: "none", fontFamily: "var(--font-jetbrains)", width: "140px" }}
+                                style={{ background: "rgba(255,255,255,0.04)", border: "none", borderRadius: "6px", padding: "0.35rem 0.7rem", color: "var(--text-2)", fontSize: "0.75rem", outline: "none", fontFamily: "var(--font-jetbrains)", width: "130px" }}
                             />
                         </div>
                     )}
