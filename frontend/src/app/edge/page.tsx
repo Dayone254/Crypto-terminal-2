@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { API_BASE } from "@/lib/api";
+import { getCachedData, setCachedData } from "@/lib/cache";
 
 // klinecharts touches `window` on import, so it must never be evaluated during
 // server-side prerendering.
@@ -128,18 +129,37 @@ const WinRateRing: React.FC<{ rate: number, total: number }> = ({ rate, total })
 
 // ── Main Page ──────────────────────────────────────────────────────────────────
 export default function EdgePage() {
-    const [stats, setStats] = useState<Stats | null>(null);
-    const [trades, setTrades] = useState<Trade[]>([]);
-    const [symbols, setSymbols] = useState<SymbolStat[]>([]);
     const [filterStatus, setFilterStatus] = useState<string>("ALL");
     const [filterSymbol, setFilterSymbol] = useState<string>("");
     const [filterPipeline, setFilterPipeline] = useState<string>("v2.0");
-    const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<"trades" | "symbols">("trades");
     const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
 
+    // Stale-While-Revalidate Caching: Initialize state synchronously from 5-minute cache
+    const [stats, setStats] = useState<Stats | null>(() => getCachedData<Stats>("edge_stats_v2.0"));
+    const [trades, setTrades] = useState<Trade[]>(() => getCachedData<Trade[]>("edge_trades_v2.0_ALL_") || []);
+    const [symbols, setSymbols] = useState<SymbolStat[]>(() => getCachedData<SymbolStat[]>("edge_symbols_v2.0") || []);
+    const [loading, setLoading] = useState<boolean>(() => !getCachedData<Stats>("edge_stats_v2.0"));
+
     const load = useCallback(async () => {
-        setLoading(true);
+        const cacheKeyStats = `edge_stats_${filterPipeline}`;
+        const cacheKeyTrades = `edge_trades_${filterPipeline}_${filterStatus}_${filterSymbol}`;
+        const cacheKeySymbols = `edge_symbols_${filterPipeline}`;
+
+        // Instantly populate state if cached data exists
+        const cachedStats = getCachedData<Stats>(cacheKeyStats);
+        const cachedTrades = getCachedData<Trade[]>(cacheKeyTrades);
+        const cachedSymbols = getCachedData<SymbolStat[]>(cacheKeySymbols);
+
+        if (cachedStats) setStats(cachedStats);
+        if (cachedTrades) setTrades(cachedTrades);
+        if (cachedSymbols) setSymbols(cachedSymbols);
+
+        // Only show loading indicator if no cache exists at all
+        if (!cachedStats && !cachedTrades) {
+            setLoading(true);
+        }
+
         try {
             const pipeQ = filterPipeline !== "ALL" ? `?pipeline_version=${filterPipeline}` : "";
             const pipeAnd = filterPipeline !== "ALL" ? `&pipeline_version=${filterPipeline}` : "";
@@ -149,9 +169,19 @@ export default function EdgePage() {
                 fetch(`${API}/trades?limit=200${filterStatus !== "ALL" ? `&status=${filterStatus}` : ""}${filterSymbol ? `&symbol=${filterSymbol}` : ""}${pipeAnd}`).then(r => r.json()),
                 fetch(`${API}/symbols${pipeQ}`).then(r => r.json()),
             ]);
-            setStats(s);
-            setTrades(t.trades || []);
-            setSymbols(sym.symbols || []);
+
+            if (s && !s.error) {
+                setStats(s);
+                setCachedData(cacheKeyStats, s);
+            }
+            if (t && t.trades) {
+                setTrades(t.trades);
+                setCachedData(cacheKeyTrades, t.trades);
+            }
+            if (sym && sym.symbols) {
+                setSymbols(sym.symbols);
+                setCachedData(cacheKeySymbols, sym.symbols);
+            }
         } catch { } finally {
             setLoading(false);
         }

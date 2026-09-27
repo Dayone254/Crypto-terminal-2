@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { CandidateRow, fetchCandidates, triggerScan } from "@/lib/api";
+import { getCachedData, setCachedData } from "@/lib/cache";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -10,7 +11,7 @@ import { AlphaStreamDock } from "@/components/AlphaStreamDock";
 import { Search } from "lucide-react";
 
 export default function DashboardPage() {
-    const [rawCandidates, setRawCandidates] = useState<CandidateRow[]>([]);
+    const [rawCandidates, setRawCandidates] = useState<CandidateRow[]>(() => getCachedData<CandidateRow[]>("scanner_candidates") || []);
     const [selectedFilter, setSelectedFilter] = useState<string>("ALL");
     const [searchQuery, setSearchQuery] = useState<string>("");
     const [selectedTimeframe, setSelectedTimeframe] = useState<string>("1H");
@@ -18,9 +19,16 @@ export default function DashboardPage() {
     const [isAlertDockCollapsed, setIsAlertDockCollapsed] = useState<boolean>(false);
 
     const loadData = useCallback(async () => {
+        const cached = getCachedData<CandidateRow[]>("scanner_candidates");
+        if (cached && cached.length > 0) {
+            setRawCandidates(cached);
+        }
         try {
             const candData = await fetchCandidates();
-            setRawCandidates(candData);
+            if (candData && Array.isArray(candData)) {
+                setRawCandidates(candData);
+                setCachedData("scanner_candidates", candData);
+            }
         } catch (err) {
             console.error("Dashboard data load error:", err);
         }
