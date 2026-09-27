@@ -435,7 +435,7 @@ async def _execute_scan(
         # prices it per symbol and per direction; the discrete label is kept only
         # so the log and stored history stay readable.
         btc_1h = candles_1h_map.get("BTC-USD")
-        btc_closes_1h = [float(c[4]) for c in btc_1h if len(c) >= 5] if btc_1h else None
+        btc_closes_1h = [float(c[4]) for c in sorted(btc_1h, key=lambda c: float(c[0])) if len(c) >= 5] if btc_1h else None
         beta_thrust = macro_thrust(btc_closes_1h, btc_day_change)
         logger.info(
             "Macro beta thrust %+.2f%% (%s); regime %s",
@@ -666,6 +666,7 @@ async def _execute_scan(
                     # Deterministic L2 confirmation gate (Part 3) — unconditional call
                     l2_bids = feats.get("l2_bids")
                     l2_asks = feats.get("l2_asks")
+                    has_l2_depth = bool(l2_bids and l2_asks)
                     l2_gate_res = confirm_l2_structure(
                         symbol=pid,
                         trade_direction=trade_direction,
@@ -673,6 +674,7 @@ async def _execute_scan(
                         l2_bids=l2_bids,
                         l2_asks=l2_asks,
                         quote_vol_24h=feats.get("quote_vol_24h"),
+                        soft_mode=not has_l2_depth,
                     )
                     score_dict["l2_gate_result"] = l2_gate_res
 

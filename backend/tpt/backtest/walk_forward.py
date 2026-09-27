@@ -81,6 +81,7 @@ def generate_rolling_windows(
     return windows
 
 
+import copy
 from tpt.strategies.base import BaseStrategy
 from tpt.strategies.registry import get_all_strategies, get_strategy_by_id
 
@@ -137,7 +138,7 @@ def run_walk_forward_backtest(
             eval_list.append((cfg, st))
 
     for cand, st_inst in eval_list:
-        base_cfg = load_strategy()
+        base_cfg = copy.deepcopy(load_strategy())
         # Override candidate parameters if evaluating standard candidate
         if st_inst is None:
             base_cfg.labeling.min_composite_score = cand.min_composite_score

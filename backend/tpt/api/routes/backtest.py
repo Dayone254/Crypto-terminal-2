@@ -96,10 +96,11 @@ async def backtest_stats(
     """Retrieve statistical edge performance."""
     try:
         async with get_connection() as conn:
-            where_clause = f"WHERE pipeline_version = '{pipeline_version}'" if pipeline_version else ""
-            where_and = f"AND pipeline_version = '{pipeline_version}'" if pipeline_version else ""
+            params = [pipeline_version] if pipeline_version else []
+            where_clause = "WHERE pipeline_version = ?" if pipeline_version else ""
+            where_and = "AND pipeline_version = ?" if pipeline_version else ""
 
-            async with conn.execute(f"SELECT status, COUNT(*) as cnt FROM signals {where_clause} GROUP BY status") as cursor:
+            async with conn.execute(f"SELECT status, COUNT(*) as cnt FROM signals {where_clause} GROUP BY status", params) as cursor:
                 rows = await cursor.fetchall()
 
             counts = {
@@ -115,16 +116,16 @@ async def backtest_stats(
             # Win rate counts profitable WIN vs LOSS. BREAK_EVEN and PARTIAL_WIN are excluded from directional edge.
             win_rate = (counts["WIN"] / directional_outcomes * 100) if directional_outcomes > 0 else 0.0
 
-            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and} ORDER BY id DESC LIMIT 50") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and} ORDER BY id DESC LIMIT 50", params) as cursor:
                 recent_trades = [dict(r) for r in await cursor.fetchall()]
 
-            async with conn.execute(f"SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2') {where_and} ORDER BY id DESC") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2') {where_and} ORDER BY id DESC", params) as cursor:
                 pending_trades = [dict(r) for r in await cursor.fetchall()]
 
             # All closed rows (not just the recent 50) feed the excursion summary
             # and the target estimate: the calibration is a property of the whole
             # ledger, and truncating it would bias the estimator.
-            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and}") as cursor:
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and}", params) as cursor:
                 closed_rows = [dict(r) for r in await cursor.fetchall()]
 
             return {
@@ -189,7 +190,8 @@ async def symbol_breakdown(
     """Return per-symbol win/loss/pending breakdown for the edge leaderboard."""
     try:
         async with get_connection() as conn:
-            where_clause = f"WHERE pipeline_version = '{pipeline_version}'" if pipeline_version else ""
+            params = [pipeline_version] if pipeline_version else []
+            where_clause = "WHERE pipeline_version = ?" if pipeline_version else ""
             async with conn.execute(
                 f"""
                 SELECT
@@ -207,7 +209,8 @@ async def symbol_breakdown(
                 GROUP BY symbol
                 ORDER BY wins DESC, total DESC
                 LIMIT 50
-                """
+                """,
+                params,
             ) as cursor:
                 rows = await cursor.fetchall()
 

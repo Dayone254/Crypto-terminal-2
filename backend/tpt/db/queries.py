@@ -59,7 +59,7 @@ async def get_latest_ladder_and_score(
         .outerjoin(Ladder, (Score.product_id == Ladder.product_id) & (Score.scan_run_id == Ladder.scan_run_id))
         .outerjoin(Feature, (Score.product_id == Feature.product_id) & (Score.scan_run_id == Feature.scan_run_id))
         .where(Score.product_id == product_id)
-        .order_by(Score.scan_run_id.desc())
+        .order_by(Score.computed_at.desc())
         .limit(1)
     )
     res = await db.execute(stmt)

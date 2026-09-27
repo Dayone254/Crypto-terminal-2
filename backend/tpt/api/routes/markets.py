@@ -179,7 +179,7 @@ async def _fetch_btc_pair_perf(candidates: list[dict[str, Any]]) -> None:
             if not safe_symbols:
                 return
 
-            symbols_json = json.dumps(safe_symbols[:100]) # cap at 100
+            symbols_json = json.dumps(safe_symbols[:100], separators=(",", ":")) # cap at 100
 
             # 2. Fetch 7D and 30D ticker data for safe symbols
             r_7d = await client.get('https://api.binance.com/api/v3/ticker', params={"windowSize": "7d", "symbols": symbols_json})
@@ -430,7 +430,7 @@ async def get_market_trade_history(product_id: str) -> list[dict[str, Any]]:
             select(Score, Ladder)
             .join(Ladder, (Score.product_id == Ladder.product_id) & (Score.scan_run_id == Ladder.scan_run_id))
             .where(Score.product_id == product_id.upper())
-            .order_by(Score.computed_at.asc())  # ASC so dedup pointer advances forward in time
+            .order_by(Score.computed_at.desc())  # DESC to pull the 100 most recent trade setups
             .limit(100)
         )
         res = await db.execute(stmt)
