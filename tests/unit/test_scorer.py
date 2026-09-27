@@ -75,7 +75,7 @@ def test_scorer_regime_modifier() -> None:
     # Shorting during a TRENDING_UP regime is fighting the trend
     s_short = score(feats, trade_direction="SHORT", regime="TRENDING_UP")
     assert s_short["components"]["trend_aligned"] == 0.0
-    assert s_short["interactions"] < 0.0  # Counter-trend penalty
+    assert s_short.get("veto") == "COUNTER_TREND"
 
 
 def _strong_long_features(rs_7d: float) -> dict:

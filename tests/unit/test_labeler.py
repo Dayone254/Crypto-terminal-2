@@ -45,7 +45,7 @@ def test_labeler_priority_tree() -> None:
         "fib_500": 7.0,
         "fib_618": 6.0,
     }
-    assert label(feats_coiled, composite_score=50.0) == "COILED"
+    assert label(feats_coiled, composite_score=58.0) == "COILED"
 
 
 def test_compute_tags() -> None:

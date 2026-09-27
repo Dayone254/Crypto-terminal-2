@@ -235,7 +235,7 @@ async def get_rs_matrix() -> dict[str, Any]:
     # 2. Extract BTC spot price and cached BTC gamma metrics
     btc_spot = 0.0
     for c in candidates:
-        if "BTC" in c.get("product_id", "").upper():
+        if c.get("product_id", "").upper() == "BTC-USD":
             btc_spot = float(c.get("last_price", 0.0) or 0.0)
             break
 

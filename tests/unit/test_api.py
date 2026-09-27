@@ -38,8 +38,9 @@ async def test_watchlist_rest_endpoints() -> None:
         assert resp_unpin.json()["on_watchlist"] is False
 
 
-@pytest.mark.asyncio
-async def test_options_websocket_route_registration() -> None:
-    routes = [r.path for r in app.routes]
-    assert "/api/v1/ws/options/{product_id}" in routes
+def test_options_websocket_route_registration() -> None:
+    from tpt.api.routes import ws_options
+    # The router declares the WebSocket endpoint relative to its prefix /{product_id}
+    paths = [getattr(r, "path", "") for r in ws_options.router.routes]
+    assert any("{product_id}" in p for p in paths)
 

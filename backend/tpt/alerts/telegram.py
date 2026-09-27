@@ -13,12 +13,17 @@ async def send_setup_alert(
     entry: float,
     tp: float,
     sl: float,
+    bypass_quiet_hours: bool = False,
 ) -> None:
     """Fire a Telegram message for a new high-conviction setup.
     
     Silently no-ops if TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID are not configured.
+    Respects user quiet hours unless bypass_quiet_hours is True.
     """
     from tpt.config.settings import settings
+    from tpt.config.strategy import load_strategy
+    from tpt.alerting.quiet_hours import should_deliver
+    from datetime import UTC, datetime
 
     token = settings.telegram_bot_token
     chat_id = settings.telegram_chat_id
@@ -26,6 +31,13 @@ async def send_setup_alert(
     if not token or not chat_id:
         logger.debug("Telegram not configured — skipping alert for %s", symbol)
         return
+
+    if not bypass_quiet_hours:
+        cfg = load_strategy().alerts
+        now = datetime.now(UTC)
+        if not should_deliver(None, now, cfg.quiet_hours_start, cfg.quiet_hours_end, cfg.timezone):
+            logger.info("Quiet hours active — suppressing setup alert for %s", symbol)
+            return
 
     try:
         from telegram import Bot

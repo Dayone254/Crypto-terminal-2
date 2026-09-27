@@ -666,7 +666,7 @@ async def _execute_scan(
                     # Deterministic L2 confirmation gate (Part 3) — unconditional call
                     l2_bids = feats.get("l2_bids")
                     l2_asks = feats.get("l2_asks")
-                    has_l2_depth = bool(l2_bids and l2_asks)
+                    has_l2_depth = bool(l2_bids or l2_asks)
                     l2_gate_res = confirm_l2_structure(
                         symbol=pid,
                         trade_direction=trade_direction,

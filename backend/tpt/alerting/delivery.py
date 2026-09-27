@@ -42,6 +42,21 @@ async def deliver_pending_alerts() -> int:
             stamp = utcnow_iso()
             for alert in rows:
                 alert.delivered_at = stamp
+                try:
+                    from tpt.alerts.telegram import send_setup_alert
+                    entry_p = alert.price_at_alert or 0.0
+                    if entry_p > 0:
+                        await send_setup_alert(
+                            symbol=alert.product_id,
+                            score=alert.score_at_alert or 0.0,
+                            label=alert.label_at_alert or "WATCH",
+                            entry=entry_p,
+                            tp=entry_p * 1.05,
+                            sl=entry_p * 0.97,
+                            bypass_quiet_hours=True,
+                        )
+                except Exception as exc:
+                    logger.warning("Telegram delivery failed for alert %s: %s", alert.id, exc)
             await db.commit()
             delivered = len(rows)
 
