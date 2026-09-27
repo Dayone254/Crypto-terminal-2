@@ -129,24 +129,22 @@ const WinRateRing: React.FC<{ rate: number, total: number }> = ({ rate, total })
 
 // ── Main Page ──────────────────────────────────────────────────────────────────
 export default function EdgePage() {
+    const [stats, setStats] = useState<Stats | null>(null);
+    const [trades, setTrades] = useState<Trade[]>([]);
+    const [symbols, setSymbols] = useState<SymbolStat[]>([]);
     const [filterStatus, setFilterStatus] = useState<string>("ALL");
     const [filterSymbol, setFilterSymbol] = useState<string>("");
     const [filterPipeline, setFilterPipeline] = useState<string>("v2.0");
+    const [loading, setLoading] = useState<boolean>(true);
     const [activeTab, setActiveTab] = useState<"trades" | "symbols">("trades");
     const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
 
-    // Stale-While-Revalidate Caching: Initialize state synchronously from 5-minute cache
-    const [stats, setStats] = useState<Stats | null>(() => getCachedData<Stats>("edge_stats_v2.0"));
-    const [trades, setTrades] = useState<Trade[]>(() => getCachedData<Trade[]>("edge_trades_v2.0_ALL_") || []);
-    const [symbols, setSymbols] = useState<SymbolStat[]>(() => getCachedData<SymbolStat[]>("edge_symbols_v2.0") || []);
-    const [loading, setLoading] = useState<boolean>(() => !getCachedData<Stats>("edge_stats_v2.0"));
-
-    const load = useCallback(async () => {
+    // Safely populate from client cache post-hydration without triggering SSR mismatch
+    useEffect(() => {
         const cacheKeyStats = `edge_stats_${filterPipeline}`;
         const cacheKeyTrades = `edge_trades_${filterPipeline}_${filterStatus}_${filterSymbol}`;
         const cacheKeySymbols = `edge_symbols_${filterPipeline}`;
 
-        // Instantly populate state if cached data exists
         const cachedStats = getCachedData<Stats>(cacheKeyStats);
         const cachedTrades = getCachedData<Trade[]>(cacheKeyTrades);
         const cachedSymbols = getCachedData<SymbolStat[]>(cacheKeySymbols);
@@ -154,11 +152,13 @@ export default function EdgePage() {
         if (cachedStats) setStats(cachedStats);
         if (cachedTrades) setTrades(cachedTrades);
         if (cachedSymbols) setSymbols(cachedSymbols);
+        if (cachedStats || cachedTrades) setLoading(false);
+    }, [filterPipeline, filterStatus, filterSymbol]);
 
-        // Only show loading indicator if no cache exists at all
-        if (!cachedStats && !cachedTrades) {
-            setLoading(true);
-        }
+    const load = useCallback(async () => {
+        const cacheKeyStats = `edge_stats_${filterPipeline}`;
+        const cacheKeyTrades = `edge_trades_${filterPipeline}_${filterStatus}_${filterSymbol}`;
+        const cacheKeySymbols = `edge_symbols_${filterPipeline}`;
 
         try {
             const pipeQ = filterPipeline !== "ALL" ? `?pipeline_version=${filterPipeline}` : "";

@@ -11,18 +11,22 @@ import { AlphaStreamDock } from "@/components/AlphaStreamDock";
 import { Search } from "lucide-react";
 
 export default function DashboardPage() {
-    const [rawCandidates, setRawCandidates] = useState<CandidateRow[]>(() => getCachedData<CandidateRow[]>("scanner_candidates") || []);
+    const [rawCandidates, setRawCandidates] = useState<CandidateRow[]>([]);
     const [selectedFilter, setSelectedFilter] = useState<string>("ALL");
     const [searchQuery, setSearchQuery] = useState<string>("");
     const [selectedTimeframe, setSelectedTimeframe] = useState<string>("1H");
     const [toastMessage, setToastMessage] = useState<string | null>(null);
     const [isAlertDockCollapsed, setIsAlertDockCollapsed] = useState<boolean>(false);
 
-    const loadData = useCallback(async () => {
+    // Safely populate from client cache post-hydration without triggering SSR mismatch
+    useEffect(() => {
         const cached = getCachedData<CandidateRow[]>("scanner_candidates");
         if (cached && cached.length > 0) {
             setRawCandidates(cached);
         }
+    }, []);
+
+    const loadData = useCallback(async () => {
         try {
             const candData = await fetchCandidates();
             if (candData && Array.isArray(candData)) {
