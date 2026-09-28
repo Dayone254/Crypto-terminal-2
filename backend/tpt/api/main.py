@@ -109,10 +109,30 @@ async def lifespan(app: FastAPI):
     # WebSocket streaming is enabled.
     options_task = ws_memory.start_options_daemon()
 
+    async def _feedback_loop() -> None:
+        """Recompute component hit rates from closed trades every hour.
+
+        The component_feedback table was write-only scaffolding: computed by
+        nothing, read by nothing. This feeds it and logs the conditioned hit
+        rates that say which scoring components actually pay.
+        """
+        from tpt.engine.feedback import compute_signal_feedback
+
+        await asyncio.sleep(60.0)
+        while True:
+            try:
+                await compute_signal_feedback()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Component feedback loop failed: %s", exc)
+            await asyncio.sleep(3600)
+
     tasks = [
         asyncio.create_task(evaluator_loop(), name="evaluator"),
         asyncio.create_task(_scan_scheduler_loop(), name="scan-scheduler"),
         asyncio.create_task(catalyst_daemon_loop(), name="catalyst-daemon"),
+        asyncio.create_task(_feedback_loop(), name="component-feedback"),
         options_task,
     ]
     try:
@@ -147,6 +167,17 @@ def create_app() -> FastAPI:
     if settings.frontend_url and settings.frontend_url != "*":
         allowed_origins.append(settings.frontend_url)
 
+    # Deployed frontends are pinned as EXACT origins. The previous
+    # allow_origin_regex `https://tpt-.*\.vercel\.app` matched any project Vercel
+    # has ever served under that prefix (including attacker-deployed
+    # `tpt-<anything>.vercel.app` previews) — and with allow_credentials=True a
+    # lookalike page could call this API with the operator's cookies.
+    if settings.additional_allowed_origins:
+        for origin in settings.additional_allowed_origins.split(","):
+            origin = origin.strip().rstrip("/")
+            if origin and origin not in allowed_origins:
+                allowed_origins.append(origin)
+
     if settings.api_token:
         @application.middleware("http")
         async def enforce_api_token(request: Request, call_next):
@@ -158,10 +189,13 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
+    # Regex narrowed to loopback dev origins only. Production origins must be
+    # listed explicitly (FRONTEND_URL / ADDITIONAL_ALLOWED_ORIGINS) — never
+    # wildcarded across a shared hosting domain.
     application.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_origin_regex=r"https://tpt-.*\.vercel\.app|https://crypto-terminal.*\.vercel\.app|http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

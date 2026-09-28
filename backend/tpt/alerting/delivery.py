@@ -16,11 +16,50 @@ from tpt.db.write_lock import db_write_lock
 logger = logging.getLogger(__name__)
 
 
-async def deliver_pending_alerts() -> int:
-    """Mark deliverable pending alerts as delivered.
+def _extract_levels(ladder_snapshot: str | None) -> tuple[float | None, float | None]:
+    """Real TP/SL for an alert, parsed from its ladder snapshot.
 
-    Quiet hours gate delivery: during the window nothing is marked delivered, and
-    the alerts stay pending for the morning digest. Returns the number delivered.
+    Zone-entry and invalidation alerts store the full ladder dict computed at
+    alert time (keys ``target_1_price`` / ``stop_price``). Snapshots without
+    those keys — DIGEST previews, malformed or absent JSON — yield ``(None,
+    None)`` so the message ships without levels instead of fabricated ones.
+    """
+    if not ladder_snapshot:
+        return None, None
+    try:
+        snap = json.loads(ladder_snapshot)
+    except (TypeError, ValueError):
+        return None, None
+    if not isinstance(snap, dict):
+        return None, None
+    try:
+        tp = float(snap["target_1_price"]) if snap.get("target_1_price") is not None else None
+        sl = float(snap["stop_price"]) if snap.get("stop_price") is not None else None
+    except (TypeError, ValueError):
+        return None, None
+    if tp is not None and tp <= 0:
+        tp = None
+    if sl is not None and sl <= 0:
+        sl = None
+    return tp, sl
+
+
+async def deliver_pending_alerts() -> int:
+    """Deliver pending (unsuppressed) alerts to Telegram.
+
+    Three rules keep this correct and cheap:
+
+    1. TP/SL come from the alert's ladder snapshot — the real levels the ladder
+       computed at alert time. Snapshots that lack them ship a message without
+       TP/SL instead of the fabricated +5%/-3% numbers this used to invent.
+    2. The SQLite write lock is never held across network I/O: candidates are
+       read under one short lock, Telegram is called with no lock and no open
+       session, and only successful sends are re-stamped under a fresh one.
+    3. A failed send is NOT marked delivered — the alert stays pending and is
+       retried on the next cycle instead of being silently lost forever.
+
+    Quiet hours gate delivery: during the window nothing is sent, and the
+    alerts stay pending for the morning digest. Returns the number delivered.
     """
     cfg = load_strategy().alerts
     now = datetime.now(UTC)
@@ -28,40 +67,67 @@ async def deliver_pending_alerts() -> int:
     if not should_deliver(None, now, cfg.quiet_hours_start, cfg.quiet_hours_end, cfg.timezone):
         return 0
 
-    delivered = 0
+    # Read candidates under a short lock, then release it before any network I/O.
     async with db_write_lock, AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Alert).where(
+            select(
+                Alert.id,
+                Alert.product_id,
+                Alert.score_at_alert,
+                Alert.label_at_alert,
+                Alert.price_at_alert,
+                Alert.ladder_snapshot,
+            ).where(
                 Alert.delivered_at.is_(None),
                 Alert.suppressed == 0,
                 Alert.alert_type != "DIGEST",
             )
         )
-        rows = result.scalars().all()
-        if rows:
-            stamp = utcnow_iso()
-            for alert in rows:
-                alert.delivered_at = stamp
-                try:
-                    from tpt.alerts.telegram import send_setup_alert
-                    entry_p = alert.price_at_alert or 0.0
-                    if entry_p > 0:
-                        await send_setup_alert(
-                            symbol=alert.product_id,
-                            score=alert.score_at_alert or 0.0,
-                            label=alert.label_at_alert or "WATCH",
-                            entry=entry_p,
-                            tp=entry_p * 1.05,
-                            sl=entry_p * 0.97,
-                            bypass_quiet_hours=True,
-                        )
-                except Exception as exc:
-                    logger.warning("Telegram delivery failed for alert %s: %s", alert.id, exc)
-            await db.commit()
-            delivered = len(rows)
+        rows = result.all()
 
-    if delivered:
-        logger.info("Delivered %d alert(s).", delivered)
+    if not rows:
+        return 0
+
+    # Telegram I/O runs OUTSIDE db_write_lock and with no open DB session —
+    # holding the SQLite write lock across HTTP stalled every reader and writer
+    # for the duration of each send.
+    sent_ids: list[str] = []
+    for row in rows:
+        tp, sl = _extract_levels(row.ladder_snapshot)
+        try:
+            from tpt.alerts.telegram import send_setup_alert
+            await send_setup_alert(
+                symbol=row.product_id,
+                score=row.score_at_alert or 0.0,
+                label=row.label_at_alert or "WATCH",
+                entry=float(row.price_at_alert or 0.0),
+                tp=tp,
+                sl=sl,
+                bypass_quiet_hours=True,
+            )
+            sent_ids.append(row.id)
+        except Exception as exc:
+            logger.warning(
+                "Telegram delivery failed for alert %s (%s): %s", row.id, row.product_id, exc
+            )
+
+    # Stamp only the alerts that actually sent, under a fresh short lock. Failed
+    # rows keep delivered_at NULL so the next cycle retries them. The is_(None)
+    # guard also keeps a concurrent worker from double-stamping.
+    delivered = 0
+    if sent_ids:
+        async with db_write_lock, AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Alert).where(Alert.id.in_(sent_ids), Alert.delivered_at.is_(None))
+            )
+            stamp = utcnow_iso()
+            for alert in result.scalars().all():
+                alert.delivered_at = stamp
+                delivered += 1
+            await db.commit()
+
+    if rows:
+        logger.info("Alert delivery: %d/%d sent.", delivered, len(rows))
     return delivered
 
 

@@ -11,14 +11,18 @@ async def send_setup_alert(
     score: float,
     label: str,
     entry: float,
-    tp: float,
-    sl: float,
+    tp: float | None = None,
+    sl: float | None = None,
     bypass_quiet_hours: bool = False,
 ) -> None:
     """Fire a Telegram message for a new high-conviction setup.
-    
+
     Silently no-ops if TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID are not configured.
     Respects user quiet hours unless bypass_quiet_hours is True.
+
+    ``tp``/``sl`` are optional: when the caller has no real levels (e.g. an alert
+    without a ladder snapshot) they are simply omitted from the message instead
+    of the caller having to fabricate plausible-looking numbers.
     """
     from tpt.config.settings import settings
     from tpt.config.strategy import load_strategy
@@ -51,20 +55,25 @@ async def send_setup_alert(
         }
         emoji = emoji_map.get(label, "⚪")
 
-        # Percent Risk/Reward
-        rr_tp = ((tp - entry) / entry * 100) if entry > 0 else 0.0
-        rr_sl = ((sl - entry) / entry * 100) if entry > 0 else 0.0
+        # Percent Risk/Reward — only when real levels were supplied.
+        rr_tp = ((tp - entry) / entry * 100) if (tp is not None and entry > 0) else 0.0
+        rr_sl = ((sl - entry) / entry * 100) if (sl is not None and entry > 0) else 0.0
 
-        message = (
-            f"{emoji} *\\[{label}\\]* `{symbol}`\n"
-            f"📊 Score: *{score:.0f}/100*\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"📥 Entry: `${entry:,.4f}`\n"
-            f"🎯 TP:    `${tp:,.4f}`  \\(+{rr_tp:.1f}%\\)\n"
-            f"🛡️  SL:    `${sl:,.4f}`  \\({rr_sl:.1f}%\\)\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"_Top Picker Terminal_"
-        )
+        lines = [
+            f"{emoji} *\\[{label}\\]* `{symbol}`\n",
+            f"📊 Score: *{score:.0f}/100*\n",
+            f"━━━━━━━━━━━━━━━━\n",
+            f"📥 Entry: `${entry:,.4f}`\n",
+        ]
+        if tp is not None:
+            lines.append(f"🎯 TP:    `${tp:,.4f}`  \\(+{rr_tp:.1f}%\\)\n")
+        if sl is not None:
+            lines.append(f"🛡️  SL:    `${sl:,.4f}`  \\({rr_sl:.1f}%\\)\n")
+        lines.extend([
+            f"━━━━━━━━━━━━━━━━\n",
+            f"_Top Picker Terminal_",
+        ])
+        message = "".join(lines)
 
         bot = Bot(token=token)
         await bot.send_message(

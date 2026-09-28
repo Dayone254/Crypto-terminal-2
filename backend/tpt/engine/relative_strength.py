@@ -87,10 +87,13 @@ def compute_relative_strength_matrix(
     if not candidates:
         return []
 
-    # Find BTC 24h change for reference fallback
+    # Find BTC 24h change for reference fallback. Exact base-asset match:
+    # a substring test ("BTC" in product_id) let WBTC-USD (or any *BTC* pair)
+    # win the first-match race and poison the benchmark change every altcoin's
+    # fallback RS is diffed against.
     btc_change = 0.0
     for c in candidates:
-        if "BTC" in c.get("product_id", "").upper():
+        if c.get("product_id", "").split("-")[0].upper() == "BTC":
             btc_change = float(c.get("day_change_pct", 0.0) or 0.0)
             break
 

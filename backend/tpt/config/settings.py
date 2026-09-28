@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     api_port: int = 8000
     frontend_url: str = "http://localhost:3000"
 
+    # Extra exact CORS origins (comma-separated), e.g. your deployed frontend:
+    #   ADDITIONAL_ALLOWED_ORIGINS=https://tpt.vercel.app,https://tpt.example.com
+    # Deliberately exact-match only — prefix/wildcard regexes over shared hosts
+    # (like *.vercel.app) admit attacker-deployed lookalike projects.
+    additional_allowed_origins: str = ""
+
     # Optional shared-secret auth. When set, every /api request must carry
     # `X-API-Token: <value>`. Empty (default) = no auth, which is only safe
     # because the API binds to localhost by default.

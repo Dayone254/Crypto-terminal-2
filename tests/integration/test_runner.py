@@ -4,8 +4,8 @@ import pytest
 from sqlalchemy import func, select
 
 from tpt.adapters.coinbase import CoinbaseAdapter
-from tpt.db.connection import AsyncSessionLocal
-from tpt.db.models import Feature, Ladder, ScanRun, Score, Snapshot
+from tpt.db.connection import AsyncSessionLocal, init_db
+from tpt.db.models import Feature, Ladder, ScanRun, Score, Snapshot, Symbol
 from tpt.scanner.runner import run_scan
 
 
@@ -83,6 +83,28 @@ async def test_run_scan_persists_results(mock_adapter: CoinbaseAdapter) -> None:
     """Regression: the scan session used to never commit, so every feature /
     score / snapshot was rolled back and the dashboard stayed empty."""
     adapter = mock_adapter
+
+    # Seed ZORA-USD as a pinned watchlist symbol. Pinned symbols get a ladder
+    # computed even at a WATCH label (ladder.py skips ladders for unpinned
+    # WATCH), so the ladder-count assertion below is meaningful. The mock
+    # fixture's flat candles score ~55, which unpinned would produce zero
+    # ladder rows and make `>= 0` a vacuous assertion.
+    await init_db()
+    async with AsyncSessionLocal() as db:
+        sym = await db.get(Symbol, "ZORA-USD")
+        if sym is None:
+            db.add(Symbol(
+                product_id="ZORA-USD",
+                base_currency="ZORA",
+                quote_currency="USD",
+                display_name="Zora",
+                active=1,
+                on_watchlist=1,
+            ))
+        else:
+            sym.on_watchlist = 1
+        await db.commit()
+
     try:
         res = await run_scan(trigger="ON_DEMAND", adapter=adapter)
         assert res.status == "DONE"
@@ -99,11 +121,11 @@ async def test_run_scan_persists_results(mock_adapter: CoinbaseAdapter) -> None:
                 )
                 assert count.scalar_one() == 2, f"{model.__name__} rows were not committed"
 
-            # Ladder rows are generated only for high-conviction candidates; the mock
-            # fixture uses flat candles so the score gate may or may not produce one.
+            # ZORA-USD is pinned on the watchlist, so it must produce a ladder
+            # row for this scan run even though the mock data only scores WATCH.
             ladders = await db.execute(
                 select(func.count()).select_from(Ladder).where(Ladder.scan_run_id == res.scan_run_id)
             )
-            assert ladders.scalar_one() >= 0  # Non-negative (may be 0 with mock data)
+            assert ladders.scalar_one() >= 1
     finally:
         await adapter.close()
