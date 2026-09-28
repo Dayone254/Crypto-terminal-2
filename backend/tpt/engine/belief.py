@@ -37,7 +37,12 @@ FeatureDict = dict[str, Any]
 
 # Bump when the meaning of any input changes, so a stored feature vector can be
 # interpreted against the definition it was actually produced under.
-FEATURE_VERSION = "fv2"
+# fv3: added the confluence-port bar-recency features (sweep low/high, WVF
+# capitulation/euphoria, RSI bull/bear divergence) — fv2 vectors lack them.
+# fv4: added the IMH momentum-quality features (trend_signed/quality/exhaustion,
+# directional_pressure) and changed trend_strength/weakness normalization to the
+# blended persistence-gated read — fv3 vectors have different trend semantics.
+FEATURE_VERSION = "fv4"
 
 # Which raw feature backs each weighted component. A component counts as backed
 # only when its source was genuinely observed: a missing source must shrink the
@@ -78,6 +83,16 @@ SCORER_INPUTS: tuple[str, ...] = (
     "bb_width_1h",
     "bb_pct_b_1h",
     "volume_ratio_1h",
+    "sweep_low_bars_ago",
+    "sweep_high_bars_ago",
+    "wvf_capitulation_bars_ago",
+    "wvf_euphoria_bars_ago",
+    "rsi_bull_div_bars_ago",
+    "rsi_bear_div_bars_ago",
+    "trend_signed_imh",
+    "trend_quality_imh",
+    "trend_exhaustion_imh",
+    "directional_pressure_1h",
     "macd_1h",
     "atr_1h",
     "atr_14d",

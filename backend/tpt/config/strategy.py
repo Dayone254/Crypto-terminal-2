@@ -29,6 +29,26 @@ class InteractionBonuses(BaseModel):
     # on a coin that has not yet made its 5%+ expansion move. Helps pre-breakout
     # coils clear the entry-score gate so they surface as EARLY setups.
     pre_breakout_coil_bonus: float = 12.0
+    # Awarded when a fresh liquidity sweep (wick through a swing point, close back
+    # inside) supports the trade direction. Sweep of a low gates longs, sweep of a
+    # high gates shorts — stop-hunt reversals are the fuel before expansion legs.
+    sweep_bonus: float = 6.0
+    # Bars within which the sweep still counts as fresh.
+    sweep_freshness_bars: int = 6
+    # Williams Vix Fix reversal votes: capitulation spike (longs) / mirrored
+    # top-side euphoria spike (shorts). Windows in bars, tunable in YAML.
+    wvf_reversal_bonus: float = 5.0
+    wvf_spike_window_bars: int = 10
+    # Regular RSI divergence votes (bull div for longs, bear div for shorts),
+    # counted from the confirmation bar (pivot right bars after the RSI pivot).
+    divergence_bonus: float = 5.0
+    divergence_window_bars: int = 10
+    # IMH ports: trend-exhaustion modifier (max points at full exhaustion,
+    # fires at exhaustion >= 0.35) and directional-pressure modifier (max
+    # points at |pressure| = 1.0, zero below pressure_min_abs).
+    exhaustion_max_points: float = 6.0
+    pressure_max_points: float = 4.0
+    pressure_min_abs: float = 0.10
 
 
 # Default component weights. These must mirror config/strategy.yaml: a

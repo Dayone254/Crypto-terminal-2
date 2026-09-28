@@ -51,6 +51,12 @@ VOL_SURGE_RATIO = 2.0
 # 1h relative strength vs BTC that confirms stealth institutional accumulation.
 RS_1H_LEAD_MIN = 1.5
 
+# Confluence-port freshness windows (bars), aligned with the scorer's defaults.
+# Recency features come from features.py; these turn recency into display tags.
+SWEEP_TAG_WINDOW_BARS = 6
+WVF_TAG_WINDOW_BARS = 10
+DIV_TAG_WINDOW_BARS = 10
+
 
 def compute_tags(
     features: FeatureDict,
@@ -111,6 +117,39 @@ def compute_tags(
         and float(vol_ratio) >= VOL_SURGE_RATIO
     ):
         tags.append("COIL_SQUEEZE")
+
+    # Confluence-port tags — direction-neutral (both sides listed so the UI can
+    # show which reversal evidence exists regardless of the traded direction).
+    if (
+        features.get("sweep_low_bars_ago") is not None
+        and int(features["sweep_low_bars_ago"]) <= SWEEP_TAG_WINDOW_BARS
+    ):
+        tags.append("SWEEP_LOW")
+    if (
+        features.get("sweep_high_bars_ago") is not None
+        and int(features["sweep_high_bars_ago"]) <= SWEEP_TAG_WINDOW_BARS
+    ):
+        tags.append("SWEEP_HIGH")
+    if (
+        features.get("wvf_capitulation_bars_ago") is not None
+        and int(features["wvf_capitulation_bars_ago"]) <= WVF_TAG_WINDOW_BARS
+    ):
+        tags.append("WVF_CAPITULATION")
+    if (
+        features.get("wvf_euphoria_bars_ago") is not None
+        and int(features["wvf_euphoria_bars_ago"]) <= WVF_TAG_WINDOW_BARS
+    ):
+        tags.append("WVF_EUPHORIA")
+    if (
+        features.get("rsi_bull_div_bars_ago") is not None
+        and int(features["rsi_bull_div_bars_ago"]) <= DIV_TAG_WINDOW_BARS
+    ):
+        tags.append("RSI_BULL_DIV")
+    if (
+        features.get("rsi_bear_div_bars_ago") is not None
+        and int(features["rsi_bear_div_bars_ago"]) <= DIV_TAG_WINDOW_BARS
+    ):
+        tags.append("RSI_BEAR_DIV")
 
     return tags
 

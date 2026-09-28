@@ -26,6 +26,20 @@ scoring:
   interaction_bonuses:
     confluence_bonus: 12.0
     breakout_bonus: 10.0
+    # Confluence ports from the operator's Pine entry system. Each is a
+    # direction-matched reversal-vote; freshness windows are in 1h bars.
+    sweep_bonus: 6.0          # wick through swing low/high, close back inside
+    sweep_freshness_bars: 6
+    wvf_reversal_bonus: 5.0   # capitulation (long) / euphoria (short) spike
+    wvf_spike_window_bars: 10
+    divergence_bonus: 5.0     # regular RSI divergence, confirmed (no lookahead)
+    divergence_window_bars: 10
+    # IMH ports: exhaustion demotes longs chasing tired moves (and rewards
+    # shorts whose target move is running out of fuel); directional pressure
+    # adds conviction when candles are pressed by real participation.
+    exhaustion_max_points: 6.0
+    pressure_max_points: 4.0
+    pressure_min_abs: 0.10
   counter_trend_penalty: 15.0
   # Graded macro-beta headwind (replaces the old hard SKIP on a hostile BTC push).
   # Points removed at full headwind, and the BTC thrust in percent at which the

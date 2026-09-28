@@ -96,8 +96,22 @@ def normalize_features(features: FeatureDict, direction: str) -> dict[str, float
         norm["liquidity"] = max(-1.0, (quote_vol / 1_000_000.0) - 1.0)  # [-1.0, 0.0]
 
     if direction == "LONG":
-        # Trend: ±5% is a strong day in crypto (not ±10%)
-        norm["trend_strength"] = max(-1.0, min(1.0, day_change / 5.0))
+        # Trend: IMH upgrade — 50/50 blend of the day_change read with the
+        # ATR-normalized regression slope (percentile-ranked magnitude), gated
+        # by R² persistence: a low-persistence move is discounted toward
+        # neutral instead of being trusted off one day's return. Falls back to
+        # the raw day read when the regression history is too short.
+        _tq = features.get("trend_quality_imh")
+        _ts = features.get("trend_signed_imh")
+        trend_quality_val = float(_tq) if _tq is not None else None
+        trend_signed_val = float(_ts) if _ts is not None else None
+        day_read = max(-1.0, min(1.0, day_change / 5.0))
+        if trend_signed_val is None or trend_quality_val is None:
+            norm["trend_strength"] = day_read
+        else:
+            blended = 0.5 * day_read + 0.5 * trend_signed_val
+            gate = 0.70 + 0.30 * trend_quality_val  # [0.70, 1.0]
+            norm["trend_strength"] = max(-1.0, min(1.0, blended * gate))
         norm["relative_strength"] = (
             max(-1.0, min(1.0, rs_vs_btc_7d / RS_7D_SCALE)) if rs_vs_btc_7d is not None else 0.0
         )
@@ -135,7 +149,20 @@ def normalize_features(features: FeatureDict, direction: str) -> dict[str, float
 
     else:
         # SHORT
-        norm["trend_weakness"] = max(-1.0, min(1.0, -day_change / 5.0))
+        # IMH upgrade, mirrored: blend of the day_change read with the signed
+        # regression read (inverted — a falling coin has negative
+        # trend_signed_imh but positive weakness), gated by R² persistence.
+        _tq = features.get("trend_quality_imh")
+        _ts = features.get("trend_signed_imh")
+        trend_quality_val = float(_tq) if _tq is not None else None
+        trend_signed_val = float(_ts) if _ts is not None else None
+        day_read = max(-1.0, min(1.0, -day_change / 5.0))
+        if trend_signed_val is None or trend_quality_val is None:
+            norm["trend_weakness"] = day_read
+        else:
+            blended = 0.5 * day_read - 0.5 * trend_signed_val
+            gate = 0.70 + 0.30 * trend_quality_val  # [0.70, 1.0]
+            norm["trend_weakness"] = max(-1.0, min(1.0, blended * gate))
         norm["relative_weakness"] = (
             max(-1.0, min(1.0, -rs_vs_btc_7d / RS_7D_SCALE)) if rs_vs_btc_7d is not None else 0.0
         )
@@ -308,6 +335,77 @@ def score(
             _coil_bonus = getattr(config.interaction_bonuses, "pre_breakout_coil_bonus", 12.0)
             features_ix += _coil_bonus
             components_dump["pre_breakout_coil_bonus"] = _coil_bonus
+
+    # 2c. Confluence-port reversal votes (from the operator's Pine entry system):
+    # liquidity sweep, Williams Vix Fix spike, regular RSI divergence. Each is a
+    # discrete bar-pattern event recorded as bar-recency by features.py; a
+    # freshness window turns recency into a boolean vote, weighted from config.
+    # Direction-matched by construction — swept lows / capitulation spikes / bull
+    # divergence are long evidence; swept highs / euphoria spikes / bear
+    # divergence are short evidence. Deliberately NOT a hard gate: a vote that
+    # fails can still be diagnosed against outcomes by the feedback loop.
+    _ix_bonuses = config.interaction_bonuses
+    _sweep_window = int(getattr(_ix_bonuses, "sweep_freshness_bars", 6))
+    _wvf_window = int(getattr(_ix_bonuses, "wvf_spike_window_bars", 10))
+    _div_window = int(getattr(_ix_bonuses, "divergence_window_bars", 10))
+    _sweep_b = float(getattr(_ix_bonuses, "sweep_bonus", 6.0))
+    _wvf_b = float(getattr(_ix_bonuses, "wvf_reversal_bonus", 5.0))
+    _div_b = float(getattr(_ix_bonuses, "divergence_bonus", 5.0))
+
+    def _recent(bars_ago: Any, window: int) -> bool:
+        return bars_ago is not None and int(bars_ago) <= window
+
+    if trade_direction == "LONG":
+        if _recent(features.get("sweep_low_bars_ago"), _sweep_window):
+            features_ix += _sweep_b
+            components_dump["sweep_support_bonus"] = _sweep_b
+        if _recent(features.get("wvf_capitulation_bars_ago"), _wvf_window):
+            features_ix += _wvf_b
+            components_dump["wvf_capitulation_bonus"] = _wvf_b
+        if _recent(features.get("rsi_bull_div_bars_ago"), _div_window):
+            features_ix += _div_b
+            components_dump["rsi_bull_div_bonus"] = _div_b
+    else:
+        if _recent(features.get("sweep_high_bars_ago"), _sweep_window):
+            features_ix += _sweep_b
+            components_dump["sweep_resistance_bonus"] = _sweep_b
+        if _recent(features.get("wvf_euphoria_bars_ago"), _wvf_window):
+            features_ix += _wvf_b
+            components_dump["wvf_euphoria_bonus"] = _wvf_b
+        if _recent(features.get("rsi_bear_div_bars_ago"), _div_window):
+            features_ix += _div_b
+            components_dump["rsi_bear_div_bonus"] = _div_b
+
+    # 2d. IMH exhaustion modifier — mirrored logic to the reversal votes.
+    # High exhaustion against a LONG is bearish evidence (tired move — demote
+    # chasing into it); high exhaustion alongside a SHORT is bullish evidence
+    # for the rollover (the drop is losing institutional fuel). Graded, not a
+    # veto: an exceptional setup can still clear the gate on other evidence.
+    _exh = features.get("trend_exhaustion_imh")
+    _exh_max = float(getattr(_ix_bonuses, "exhaustion_max_points", 6.0))
+    if _exh is not None and float(_exh) >= 0.35:
+        _exh_val = float(_exh)
+        _exh_pts = _exh_max * _exh_val
+        if trade_direction == "LONG":
+            features_ix -= _exh_pts
+            components_dump["exhaustion_penalty"] = round(-_exh_pts, 2)
+        else:
+            features_ix += _exh_pts
+            components_dump["exhaustion_fuel_gone_bonus"] = round(_exh_pts, 2)
+
+    # 2e. Directional pressure modifier — a move pressed by real participation
+    # in the trade's direction adds conviction; pressure against it trims.
+    # Graded ±_dp_max at full pressure, linear in between, zero-gapped.
+    _dp = features.get("directional_pressure_1h")
+    _dp_max = float(getattr(_ix_bonuses, "pressure_max_points", 4.0))
+    _dp_min = float(getattr(_ix_bonuses, "pressure_min_abs", 0.10))
+    if _dp is not None:
+        _dp_val = float(_dp)
+        _dp_aligned = _dp_val if trade_direction == "LONG" else -_dp_val
+        if abs(_dp_aligned) >= _dp_min:
+            _dp_pts = _dp_max * _dp_aligned
+            features_ix += _dp_pts
+            components_dump["directional_pressure"] = round(_dp_pts, 2)
 
     # 3. Regime Modifiers
     # Shorting into TRENDING_UP (or longing into TRENDING_DOWN) fights the macro trend.

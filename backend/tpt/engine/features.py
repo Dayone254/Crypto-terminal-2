@@ -282,6 +282,423 @@ def _compute_volume_ratio(candles: list[list[Any]], lookback: int = 20) -> float
         return round(active_vol / avg_vol, 4)
 
 
+# ── Confluence detectors (ported from the operator's Pine entry system) ──────
+#
+# Three bar-pattern detectors that share a common shape: a discrete event fires
+# on some bar, and the feature records HOW RECENTLY it fired (bars ago) rather
+# than a boolean. The scorer/labeler then apply their own freshness window.
+# This mirrors the Pine system's `ta.barssince(event) <= window` pattern and
+# keeps the raw recency available for later empirical tuning of the windows.
+#
+# All are pure candle math over the 1h series the scanner already fetches —
+# no new API calls, no new pipeline stages.
+
+# A sweep only satisfies a freshness gate if it happened within this many bars.
+SWEEP_FRESHNESS_BARS = 6
+# Capitulation / euphoria spikes stay "recent" for this many bars.
+WVF_SPIKE_WINDOW_BARS = 10
+# A confirmed RSI divergence stays "recent" for this many bars.
+DIV_RECENT_WINDOW_BARS = 10
+
+# Sweep pivot half-width (bars each side of a candidate swing point).
+SWEEP_PIVOT_LEN = 5
+
+# Williams Vix Fix parameters (Chris Moody's CM_Williams_Vix_Fix, own port).
+WVF_PERIOD = 22        # lookback for the highest-close anchor
+WVF_BB_LEN = 20        # Bollinger window over the WVF series
+WVF_BB_MULT = 2.0      # Bollinger width in standard deviations
+WVF_PCT_LOOKBACK = 50  # percentile window over the WVF series
+WVF_PCT_THRESH = 0.85  # spike fires at/above this fraction of the window max
+
+# RSI divergence parameters (regular divergence only).
+DIV_RSI_LEN = 14
+DIV_PIVOT_LEFT = 5
+DIV_PIVOT_RIGHT = 5
+DIV_MIN_GAP = 5       # min bars between the two pivots
+DIV_MAX_GAP = 60      # max bars between the two pivots
+
+
+def _detect_sweeps(candles: list[list[Any]] | None) -> tuple[int | None, int | None]:
+    """Detect liquidity sweeps on the 1h candles.
+
+    A sweep is a wick that pierces the most recent unbroken swing point while
+    price closes back inside it — resting liquidity beyond the level got taken
+    and rejected. A genuine close-through invalidates the level instead (that
+    is a break, not a sweep).
+
+    Returns ``(sweep_low_bars_ago, sweep_high_bars_ago)`` where each value is
+    the recency in bars of the most recent sweep of that side, or ``None`` if
+    no sweep occurred (or the level was closed through first). Swept lows gate
+    long reversals; swept highs gate short reversals.
+    """
+    if not candles or len(candles) < SWEEP_PIVOT_LEN * 2 + 3:
+        return None, None
+    highs = [float(c[2]) for c in candles if len(c) >= 6]
+    lows = [float(c[1]) for c in candles if len(c) >= 6]
+    closes = [float(c[4]) for c in candles if len(c) >= 6]
+    n = min(len(highs), len(lows), len(closes))
+    if n < SWEEP_PIVOT_LEN * 2 + 3:
+        return None, None
+    L = SWEEP_PIVOT_LEN
+
+    def _most_recent_pivot(is_high: bool) -> int | None:
+        """Newest confirmed swing point with at least L bars after it."""
+        for i in range(n - 1 - L, L - 1, -1):
+            if is_high:
+                if (
+                    highs[i] > max(highs[i - L:i])
+                    and highs[i] > max(highs[i + 1:i + 1 + L])
+                ):
+                    return i
+            else:
+                if (
+                    lows[i] < min(lows[i - L:i])
+                    and lows[i] < min(lows[i + 1:i + 1 + L])
+                ):
+                    return i
+        return None
+
+    def _sweep_bars_ago(pivot_idx: int, level: float, is_high: bool) -> int | None:
+        """Recency of the most recent sweep of ``level``, or None.
+
+        Walking forward from the pivot: a close through kills the level (any
+        sweep that happened before the break still counts, matching the Pine
+        implementation's barssince semantics), a wick-through-with-close-back
+        is the sweep event.
+        """
+        last_sweep: int | None = None
+        for j in range(pivot_idx + 1, n):
+            wick_through = highs[j] > level if is_high else lows[j] < level
+            close_through = closes[j] > level if is_high else closes[j] < level
+            if close_through:
+                return last_sweep
+            if wick_through:
+                last_sweep = n - 1 - j
+        return last_sweep
+
+    ph = _most_recent_pivot(is_high=True)
+    sweep_high = _sweep_bars_ago(ph, highs[ph], True) if ph is not None else None
+    pl = _most_recent_pivot(is_high=False)
+    sweep_low = _sweep_bars_ago(pl, lows[pl], False) if pl is not None else None
+    return sweep_low, sweep_high
+
+
+def _detect_wvf_spike(candles: list[list[Any]] | None, top_side: bool) -> int | None:
+    """Williams Vix Fix spike recency, in bars ago (None if none / not enough data).
+
+    Bottom side (``top_side=False``) measures panic: distance of the bar's low
+    from the highest close of the trailing window. Top side mirrors it for
+    euphoria: distance of the bar's high from the LOWEST close — a genuine
+    short-side counterpart rather than a negation of the long condition.
+    A spike fires when the WVF value exceeds its Bollinger band OR reaches the
+    85th percentile of its trailing window.
+    """
+    if not candles or len(candles) < WVF_PERIOD + WVF_BB_LEN:
+        return None
+    highs = [float(c[2]) for c in candles if len(c) >= 6]
+    lows = [float(c[1]) for c in candles if len(c) >= 6]
+    closes = [float(c[4]) for c in candles if len(c) >= 6]
+    n = min(len(highs), len(lows), len(closes))
+    if n < WVF_PERIOD + WVF_BB_LEN:
+        return None
+
+    wvf: list[float] = []
+    for i in range(n):
+        lo = max(0, i - WVF_PERIOD + 1)
+        if top_side:
+            base = min(closes[lo:i + 1])
+            wvf.append((highs[i] - base) / base * 100.0 if base > 0 else 0.0)
+        else:
+            peak = max(closes[lo:i + 1])
+            wvf.append((peak - lows[i]) / peak * 100.0 if peak > 0 else 0.0)
+
+    last_spike: int | None = None
+    for i in range(WVF_BB_LEN - 1, n):
+        window = wvf[i - WVF_BB_LEN + 1:i + 1]
+        mean = sum(window) / len(window)
+        var = sum((x - mean) ** 2 for x in window) / len(window)
+        std = var ** 0.5
+        pct_window = wvf[max(0, i - WVF_PCT_LOOKBACK + 1):i + 1]
+        pct_thresh = max(pct_window) * WVF_PCT_THRESH
+        # The band test requires the value to actually exceed the band mean: on a
+        # perfectly flat series (std == 0) `wvf >= mean + 2*0` would otherwise
+        # flag every bar as a spike. Real dead-market data does produce std == 0.
+        band_spike = wvf[i] > mean and wvf[i] >= mean + WVF_BB_MULT * std
+        if band_spike or wvf[i] >= pct_thresh:
+            last_spike = n - 1 - i
+    return last_spike
+
+
+def _compute_rsi_series(closes: list[float], period: int = 14) -> list[float | None]:
+    """Full Wilder RSI series (None for the first ``period`` slots)."""
+    out: list[float | None] = [None] * len(closes)
+    if len(closes) < period + 1:
+        return out
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    out[period] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        out[i + 1] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    return out
+
+
+def _detect_rsi_divergence(candles: list[list[Any]] | None) -> tuple[int | None, int | None]:
+    """Regular RSI divergence recency on the 1h closes.
+
+    Bullish: price makes a lower low while RSI makes a higher low (sellers
+    exhausting). Bearish: price higher high while RSI lower high (buyers
+    exhausting). Divergences only confirm ``DIV_PIVOT_RIGHT`` bars after the
+    RSI pivot — the returned recency is measured from that confirmation bar,
+    matching the Pine implementation (no repaint, no lookahead).
+
+    Returns ``(bull_bars_ago, bear_bars_ago)``, each None when absent.
+    """
+    if not candles or len(candles) < DIV_MAX_GAP + 2 * (DIV_PIVOT_LEFT + DIV_PIVOT_RIGHT):
+        return None, None
+    closes = [float(c[4]) for c in candles if len(c) >= 5]
+    if len(closes) < DIV_MAX_GAP + 2 * (DIV_PIVOT_LEFT + DIV_PIVOT_RIGHT):
+        return None, None
+    rsi = _compute_rsi_series(closes, DIV_RSI_LEN)
+    n = len(closes)
+    L, R = DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT
+
+    def _pivots(is_high: bool) -> list[tuple[int, float]]:
+        piv: list[tuple[int, float]] = []
+        for i in range(L, n - R):
+            v = rsi[i]
+            if v is None:
+                continue
+            window = [rsi[j] for j in range(i - L, i + R + 1) if j != i and rsi[j] is not None]
+            if len(window) < L + R:
+                continue
+            if is_high and all(v > w for w in window):
+                piv.append((i, v))
+            if not is_high and all(v < w for w in window):
+                piv.append((i, v))
+        return piv
+
+    def _divergence_bars_ago(pivots: list[tuple[int, float]], price_lower: bool) -> int | None:
+        """Most recent qualifying divergence, measured from its confirmation bar."""
+        for k in range(len(pivots) - 1, 0, -1):
+            i0, v0 = pivots[k - 1]
+            i1, v1 = pivots[k]
+            gap = i1 - i0
+            if not (DIV_MIN_GAP <= gap <= DIV_MAX_GAP):
+                continue
+            price_ok = closes[i1] < closes[i0] if price_lower else closes[i1] > closes[i0]
+            rsi_ok = v1 > v0 if price_lower else v1 < v0
+            if price_ok and rsi_ok:
+                return (n - 1) - (i1 + R)
+        return None
+
+    bull = _divergence_bars_ago(_pivots(is_high=False), price_lower=True)
+    bear = _divergence_bars_ago(_pivots(is_high=True), price_lower=False)
+    return bull, bear
+
+
+# ── IMH momentum-quality engine (ported from the operator's IMH V7) ─────────
+#
+# Three continuous features measuring HOW a move happens, not just how much:
+#   - trend quality: ATR-normalized regression slope, percentile-ranked against
+#     its own history, gated by R² persistence (a grinding stair-step scores
+#     high; one big day inside chop scores low).
+#   - trend exhaustion: high persistence × deceleration against the trend ×
+#     fading participation — the pre-rollover signature.
+#   - directional pressure: close-location + body + wick imbalance, scaled by
+#     relative volume — is this move being pressed by real participation.
+#
+# All percentile ranks use the same self-calibration philosophy as IMH: values
+# are normalized against their own trailing window, so thresholds adapt to
+# each symbol's volatility character instead of fixed scalars.
+
+IMH_LR_LEN = 21           # regression / ATR / effort window
+IMH_CALIBRATION = 100     # percentile-rank window for slope & acceleration
+IMH_VOL_BASELINE = 20     # relative-volume SMA window
+IMH_VOL_Z_BASELINE = 100  # volume z-score baseline
+
+
+def _linreg_slope(values: list[float], length: int) -> float | None:
+    """Slope of the linear regression of the last ``length`` values (per bar).
+
+    Equivalent to Pine's ta.linreg(v, len, 0) - ta.linreg(v, len, 1).
+    Returns None while there is less than ``length`` samples.
+    """
+    if len(values) < length:
+        return None
+    window = values[-length:]
+    n = float(length)
+    xs = list(range(length))
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(window) / n
+    denom = sum((x - mean_x) ** 2 for x in xs)
+    if denom <= 0:
+        return None
+    beta = sum((xs[i] - mean_x) * (window[i] - mean_y) for i in range(length)) / denom
+    return beta
+
+
+def _percentile_rank(values: list[float], current: float, inclusive: bool = True) -> float | None:
+    """Percentile rank of ``current`` within ``values`` [0, 100]. None if empty.
+
+    ``inclusive=True`` matches Pine's ta.percentrank (values <= current count),
+    so a steady series pins at 100 — the desired reading for slope magnitude in
+    an established trend. ``inclusive=False`` counts strictly-less values, so
+    ties rank 0 — the desired reading for deceleration, where an all-zero
+    history must NOT read as maximal deceleration.
+    """
+    if not values:
+        return None
+    if inclusive:
+        count = sum(1 for v in values if v <= current)
+    else:
+        count = sum(1 for v in values if v < current)
+    return count / len(values) * 100.0
+
+
+def _compute_trend_quality(candles: list[list[Any]] | None) -> tuple[float | None, float | None, float | None]:
+    """(trend_signed, trend_quality, exhaustion_score) from 1h closes.
+
+    trend_signed ∈ [-1, 1]: sign of the raw regression slope × percentile rank
+    of |slope| (direction from the slope itself, magnitude self-calibrated —
+    IMH V7's 'Slope Sign' mode; the legacy rank-sign mode misread steady
+    downtrends as bullish because percentrank ties pin near 100).
+
+    trend_quality ∈ [0, 1]: R² of close-vs-time (persistence) — how linear the
+    recent move is, regardless of direction.
+
+    exhaustion_score ∈ [0, 1]: persistence × deceleration-against-trend ×
+    participation-fade. High values mark vertical moves losing institutional
+    fuel — the pre-rollover signature for shorts (and a chase warning for
+    longs).
+    """
+    if not candles or len(candles) < IMH_LR_LEN + 2:
+        return None, None, None
+    closes = [float(c[4]) for c in candles if len(c) >= 5]
+    vols = [float(c[5]) for c in candles if len(c) >= 6]
+    if len(closes) < IMH_LR_LEN + 2:
+        return None, None, None
+
+    # Slope series (one per bar, once enough history exists) for rank context.
+    slopes: list[float] = []
+    for i in range(IMH_LR_LEN, len(closes) + 1):
+        s = _linreg_slope(closes[:i], IMH_LR_LEN)
+        if s is not None:
+            slopes.append(s)
+    if len(slopes) < 5:
+        return None, None, None
+
+    current_slope = slopes[-1]
+    atr = _compute_atr(candles, IMH_LR_LEN) or 0.0
+    scale = max(atr, 1e-7)
+    slope_ratio = current_slope / scale
+
+    # Magnitude: percentile rank of |slope| against its own history (inclusive,
+    # Pine semantics — a steady trend pins at full strength).
+    abs_ratios = [abs(s) / scale for s in slopes]
+    mag_rank = _percentile_rank(abs_ratios[:-1], abs(abs_ratios[-1]), inclusive=True)
+    if mag_rank is None:
+        return None, None, None
+    trend_signed = (1.0 if current_slope > 0 else -1.0 if current_slope < 0 else 0.0) * (mag_rank / 100.0)
+
+    # Persistence: R² of close vs time over the regression window.
+    window = closes[-IMH_LR_LEN:]
+    n = float(IMH_LR_LEN)
+    xs = list(range(IMH_LR_LEN))
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(window) / n
+    denom_x = sum((x - mean_x) ** 2 for x in xs)
+    if denom_x <= 0:
+        return None, None, None
+    beta = sum((xs[i] - mean_x) * (window[i] - mean_y) for i in range(IMH_LR_LEN)) / denom_x
+    alpha = mean_y - beta * mean_x
+    ss_tot = sum((y - mean_y) ** 2 for y in window)
+    ss_res = sum((window[i] - (alpha + beta * xs[i])) ** 2 for i in range(IMH_LR_LEN))
+    persistence = 0.0 if ss_tot <= 0 else max(0.0, 1.0 - ss_res / ss_tot)
+    trend_quality = persistence
+
+    # Exhaustion: deceleration against the trend × participation fade.
+    # Deceleration is SELF-CALIBRATED like IMH: the raw slope decline (per bar,
+    # ATR-normalized) is percentile-ranked against its own trailing history
+    # (strict — an all-zero history must rank 0, not 100). The 21-bar regression
+    # window smooths a stall, so a raw decel threshold would fire far too late;
+    # "unusual for this symbol" is the honest test.
+    decels: list[float] = []
+    for i in range(1, len(slopes)):
+        prev_s, cur_s = slopes[i - 1], slopes[i]
+        if prev_s * cur_s > 0:  # same-direction legs only
+            decels.append(max(0.0, (abs(prev_s) - abs(cur_s)) / scale))
+        else:
+            decels.append(0.0)
+    current_decel = decels[-1] if decels else 0.0
+    decel_context = decels[-IMH_CALIBRATION:-1]
+    decel_rank = _percentile_rank(decel_context, current_decel, inclusive=False)
+    deceleration = (decel_rank / 100.0) if decel_rank is not None else 0.0
+    rel_vol: float | None = None
+    if len(vols) >= IMH_VOL_BASELINE + 1:
+        avg_vol = sum(vols[-(IMH_VOL_BASELINE + 1):-1]) / IMH_VOL_BASELINE
+        if avg_vol > 0:
+            rel_vol = vols[-1] / avg_vol
+    participation_fade = 1.0 if rel_vol is None else max(0.0, min(1.0, 1.0 - (rel_vol - 0.5) / 1.5))
+    exhaustion = persistence * deceleration * participation_fade
+
+    return round(trend_signed, 4), round(trend_quality, 4), round(exhaustion, 4)
+
+
+def _compute_directional_pressure(candles: list[list[Any]] | None) -> float | None:
+    """Directional pressure × relative volume, EMA-smoothed (IMH volume engine).
+
+    Per bar: 0.40·close_location + 0.40·body_pressure + 0.20·wick_imbalance,
+    each in [-1, 1], scaled by relative volume (vol / SMA-20), then smoothed
+    with a 3-bar EMA. Positive = buyers pressing with participation; negative
+    = sellers pressing. None when candle history is too short.
+    """
+    if not candles or len(candles) < IMH_VOL_BASELINE + 4:
+        return None
+    # chronological: [time, low, high, open, close, volume]
+    rows = [c for c in candles if len(c) >= 6]
+    if len(rows) < IMH_VOL_BASELINE + 4:
+        return None
+
+    pressures: list[float] = []
+    rel_vols: list[float] = []
+    for i in range(1, len(rows)):
+        low = float(rows[i][1])
+        high = float(rows[i][2])
+        open_ = float(rows[i][3])
+        close = float(rows[i][4])
+        vol = float(rows[i][5])
+        rng = max(high - low, 1e-9)
+        close_location = ((close - low) - (high - close)) / rng
+        body_pressure = (close - open_) / rng
+        upper_wick = high - max(close, open_)
+        lower_wick = min(close, open_) - low
+        wick_imbalance = (lower_wick - upper_wick) / rng
+        pressures.append(0.40 * close_location + 0.40 * body_pressure + 0.20 * wick_imbalance)
+        window_vols = [float(r[5]) for r in rows[max(0, i - IMH_VOL_BASELINE):i]]
+        avg_vol = sum(window_vols) / len(window_vols) if window_vols else 0.0
+        rel_vols.append(vol / avg_vol if avg_vol > 0 else 1.0)
+
+    # Combine and smooth with a 3-bar EMA over the last few bars. The raw
+    # pressure formula peaks around ±0.4-0.6 at rel_vol 1.0 (0.4/0.4/0.2 weights
+    # never all align at ±1), so scale ×2 to use the claimed [-1, 1] domain —
+    # mirrors IMH's dominanceSensitivity multiplier.
+    combined = [p * min(rv, 3.0) * 2.0 for p, rv in zip(pressures, rel_vols)]
+    tail = combined[-5:]
+    ema = tail[0]
+    k = 2.0 / (3.0 + 1)
+    for v in tail[1:]:
+        ema = v * k + ema * (1 - k)
+    return round(max(-1.0, min(1.0, ema)), 4)
+
+
 def compute_features(
     raw_stats: dict[str, Any],
     raw_ticker: dict[str, Any],
@@ -357,6 +774,18 @@ def compute_features(
     if candles_1h:
         closes_1h = [float(c[4]) for c in candles_1h if len(c) >= 5]
         rsi_1h = _compute_rsi(closes_1h, period=14)
+
+    # Confluence detectors (sweep / WVF / divergence) over the same 1h series.
+    # Each stores bar-recency (int) or None; freshness gates live downstream so
+    # the raw observation stays auditable and the windows stay tunable.
+    sweep_low_bars_ago, sweep_high_bars_ago = _detect_sweeps(candles_1h)
+    wvf_capitulation_bars_ago = _detect_wvf_spike(candles_1h, top_side=False)
+    wvf_euphoria_bars_ago = _detect_wvf_spike(candles_1h, top_side=True)
+    rsi_bull_div_bars_ago, rsi_bear_div_bars_ago = _detect_rsi_divergence(candles_1h)
+
+    # IMH momentum-quality features (trend quality / exhaustion / pressure).
+    trend_signed_imh, trend_quality_imh, trend_exhaustion_imh = _compute_trend_quality(candles_1h)
+    directional_pressure_1h = _compute_directional_pressure(candles_1h)
 
     # RS vs BTC — multi-horizon.
     rs_vs_btc = day_change_pct - btc_day_change_pct if btc_day_change_pct is not None else 0.0
@@ -492,6 +921,16 @@ def compute_features(
         "bb_pct_b_1h": bb_pct_b_1h,
         "atr_1h": atr_1h,
         "volume_ratio_1h": volume_ratio_1h,
+        "sweep_low_bars_ago": sweep_low_bars_ago,
+        "sweep_high_bars_ago": sweep_high_bars_ago,
+        "wvf_capitulation_bars_ago": wvf_capitulation_bars_ago,
+        "wvf_euphoria_bars_ago": wvf_euphoria_bars_ago,
+        "rsi_bull_div_bars_ago": rsi_bull_div_bars_ago,
+        "rsi_bear_div_bars_ago": rsi_bear_div_bars_ago,
+        "trend_signed_imh": trend_signed_imh,
+        "trend_quality_imh": trend_quality_imh,
+        "trend_exhaustion_imh": trend_exhaustion_imh,
+        "directional_pressure_1h": directional_pressure_1h,
         "ema_trend_6h": ema_trend_6h,
         "rs_vs_btc": round(rs_vs_btc, 4),
         "rs_vs_btc_1h": rs_vs_btc_1h,
