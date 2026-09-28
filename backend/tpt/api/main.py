@@ -151,9 +151,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Explicit allow-list. The previous `allow_origins=["*"]` combined with
-    # allow_credentials is an invalid/dangerous combination that lets any page
-    # the user visits call this API.
+    # Explicit allow-list. Include local development origins and production Vercel domains.
     allowed_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
@@ -163,15 +161,11 @@ def create_app() -> FastAPI:
         "http://127.0.0.1:3002",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://crypto-terminal-2.vercel.app",
     ]
     if settings.frontend_url and settings.frontend_url != "*":
         allowed_origins.append(settings.frontend_url)
 
-    # Deployed frontends are pinned as EXACT origins. The previous
-    # allow_origin_regex `https://tpt-.*\.vercel\.app` matched any project Vercel
-    # has ever served under that prefix (including attacker-deployed
-    # `tpt-<anything>.vercel.app` previews) — and with allow_credentials=True a
-    # lookalike page could call this API with the operator's cookies.
     if settings.additional_allowed_origins:
         for origin in settings.additional_allowed_origins.split(","):
             origin = origin.strip().rstrip("/")
@@ -189,13 +183,11 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
-    # Regex narrowed to loopback dev origins only. Production origins must be
-    # listed explicitly (FRONTEND_URL / ADDITIONAL_ALLOWED_ORIGINS) — never
-    # wildcarded across a shared hosting domain.
+    # Allow local development and Vercel deployed frontend origins
     application.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|.*\.vercel\.app)(:\d+)?",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
