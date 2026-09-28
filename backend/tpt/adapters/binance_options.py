@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-import httpx
+from tpt.adapters.shared_client import get_shared_client
 
 logger = logging.getLogger("tpt.adapters.binance_options")
 
@@ -14,15 +14,15 @@ async def fetch_options_tickers(underlying: str = "BTC") -> list[dict[str, Any]]
     """
     url = f"{EAPI_URL}/eapi/v1/ticker"
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=2.0)
-            if response.status_code != 200:
-                logger.error(f"Failed to fetch Binance options tickers: HTTP {response.status_code}")
-                return []
-            data = response.json()
-            # Filter for the requested underlying asset (e.g. starts with BTC-)
-            filtered = [d for d in data if d.get("symbol", "").startswith(f"{underlying}-")]
-            return filtered
+        client = get_shared_client()
+        response = await client.get(url, timeout=2.0)
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch Binance options tickers: HTTP {response.status_code}")
+            return []
+        data = response.json()
+        # Filter for the requested underlying asset (e.g. starts with BTC-)
+        filtered = [d for d in data if d.get("symbol", "").startswith(f"{underlying}-")]
+        return filtered
     except Exception as e:
         logger.error(f"Exception fetching Binance options tickers: {e}")
         return []
@@ -33,14 +33,14 @@ async def fetch_options_mark_prices(underlying: str = "BTC") -> list[dict[str, A
     """
     url = f"{EAPI_URL}/eapi/v1/mark"
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=2.0)
+        client = get_shared_client()
+        response = await client.get(url, timeout=2.0)
 
-            if response.status_code != 200:
-                return []
-            data = response.json()
-            filtered = [d for d in data if d.get("symbol", "").startswith(f"{underlying}-")]
-            return filtered
+        if response.status_code != 200:
+            return []
+        data = response.json()
+        filtered = [d for d in data if d.get("symbol", "").startswith(f"{underlying}-")]
+        return filtered
     except Exception as e:
         logger.error(f"Exception fetching mark prices: {e}")
         return []

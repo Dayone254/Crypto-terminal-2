@@ -89,12 +89,12 @@ async def calculate_macro_gamma_exposure(underlying: str, spot_price: float = 0.
 
         if spot_price <= 0:
             try:
-                import httpx
+                from tpt.adapters.shared_client import get_shared_client
                 sym = f"{underlying.upper()}USDT"
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    res = await client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}")
-                    if res.status_code == 200:
-                        spot_price = float(res.json().get("price", 0.0))
+                client = get_shared_client()
+                res = await client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=2.0)
+                if res.status_code == 200:
+                    spot_price = float(res.json().get("price", 0.0))
             except Exception as pe:
                 logger.warning(f"Could not fetch spot fallback for {underlying}: {pe}")
 

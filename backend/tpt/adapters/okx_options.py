@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import Any
 
-import httpx
+from tpt.adapters.shared_client import get_shared_client
 
 logger = logging.getLogger("tpt.adapters.okx_options")
 
@@ -70,16 +70,14 @@ async def aggregate_okx_options(underlying: str = "BTC") -> list[dict[str, Any]]
     ticker_resp = None
     oi_resp = None
 
-    async with httpx.AsyncClient(timeout=2.0) as client:
+    client = get_shared_client()
+    try:
+        ticker_task = asyncio.create_task(client.get(f"{OKX_BASE}/market/tickers", params={"instType": "OPTION", "uly": uly}, timeout=2.0))
+        oi_task     = asyncio.create_task(client.get(f"{OKX_BASE}/public/open-interest", params={"instType": "OPTION", "uly": uly}, timeout=2.0))
 
-        # Fire both requests concurrently manually
-        try:
-            ticker_task = asyncio.create_task(client.get(f"{OKX_BASE}/market/tickers", params={"instType": "OPTION", "uly": uly}))
-            oi_task     = asyncio.create_task(client.get(f"{OKX_BASE}/public/open-interest", params={"instType": "OPTION", "uly": uly}))
-
-            ticker_resp, oi_resp = await asyncio.gather(ticker_task, oi_task)
-        except Exception as exc:
-            logger.warning("OKX concurrent fetch error: %s", exc)
+        ticker_resp, oi_resp = await asyncio.gather(ticker_task, oi_task)
+    except Exception as exc:
+        logger.warning("OKX concurrent fetch error: %s", exc)
 
     # ── Parse Open Interest map: instId → (oi_coin, oi_usd) ────────────────
     oi_map_coin: dict[str, float] = {}

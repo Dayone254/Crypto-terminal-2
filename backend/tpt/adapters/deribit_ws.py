@@ -164,7 +164,8 @@ async def _run_ws_for_underlying(underlying: str) -> None:
                         _LIVE_BOARDS[key].setdefault(inst, {})["_parsed"] = parsed
 
                 # Step 2: subscribe in chunks of 100 (WS msg size limit)
-                channels = [f"ticker.{i}.raw" for i in instruments]
+                # Use 100ms aggregated ticker channels to prevent high-frequency message flood & RAM growth
+                channels = [f"ticker.{i}.100ms" for i in instruments]
                 for chunk_start in range(0, len(channels), 100):
                     chunk = channels[chunk_start:chunk_start + 100]
                     await ws.send(json.dumps({

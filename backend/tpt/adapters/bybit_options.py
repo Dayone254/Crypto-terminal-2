@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
+from tpt.adapters.shared_client import get_shared_client
 
 logger = logging.getLogger("tpt.adapters.bybit_options")
 
@@ -27,8 +27,8 @@ async def aggregate_bybit_options(underlying: str = "BTC") -> list[dict[str, Any
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(url, params=params, headers=headers)
+        client = get_shared_client()
+        response = await client.get(url, params=params, headers=headers, timeout=2.0)
 
         if response.status_code != 200:
             logger.warning("Bybit Options API returned HTTP %d", response.status_code)

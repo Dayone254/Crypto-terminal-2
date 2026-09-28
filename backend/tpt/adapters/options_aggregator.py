@@ -124,6 +124,8 @@ async def _fetch_and_cache(underlying: str) -> tuple[list[dict[str, Any]], dict[
 
         return combined_board, venue_metrics
 
+_BACKGROUND_TASKS: dict[str, asyncio.Task] = {}
+
 async def aggregate_multi_venue_options_board(underlying: str = "BTC") -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Returns options board and venue metrics for the requested underlying asset.
@@ -136,8 +138,11 @@ async def aggregate_multi_venue_options_board(underlying: str = "BTC") -> tuple[
     if cached:
         age = now - cached["timestamp"]
         if age > _CACHE_TTL_SECONDS:
-            # Trigger background refresh if stale without blocking the request
-            asyncio.create_task(_fetch_and_cache(base))
+            # Trigger background refresh if stale without blocking the request,
+            # deduplicating tasks to prevent unbounded task spawning.
+            task = _BACKGROUND_TASKS.get(base)
+            if task is None or task.done():
+                _BACKGROUND_TASKS[base] = asyncio.create_task(_fetch_and_cache(base))
         return cached["combined_board"], cached["venue_metrics"]
 
     # First cold fetch: wait for initial population

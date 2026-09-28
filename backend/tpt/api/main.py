@@ -141,6 +141,8 @@ async def lifespan(app: FastAPI):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        from tpt.adapters.shared_client import close_shared_client
+        await close_shared_client()
 
 
 def create_app() -> FastAPI:
