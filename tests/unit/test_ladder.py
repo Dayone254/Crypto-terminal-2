@@ -131,3 +131,24 @@ def test_tranche_b_stays_inside_the_stop() -> None:
     )
     assert lad is not None
     assert lad["stop_price"] < lad["tranche_b_price"] < lad["tranche_a_price"]
+
+
+def test_ladder_rounding_preserves_sub_penny_levels() -> None:
+    """round(x, 6) collapsed PEPE-scale ladders to a single float (entry==SL==TP)."""
+    from tpt.engine.ladder import _round_price
+
+    stop, entry, tp = 5.141e-06, 5.3e-06, 5.459e-06
+    r_stop, r_entry, r_tp = _round_price(stop), _round_price(entry), _round_price(tp)
+    assert r_entry != r_stop, "entry and stop must not collapse together"
+    assert r_tp > r_entry > r_stop
+    assert r_stop == 5.141e-06 and r_entry == 5.3e-06 and r_tp == 5.459e-06
+
+
+def test_ladder_rounding_unchanged_at_normal_scales() -> None:
+    from tpt.engine.ladder import _round_price
+
+    assert _round_price(43012.123456789) == round(43012.123456789, 6)
+    assert _round_price(104.530712345) == round(104.530712345, 6)
+    assert _round_price(0.132456789) == round(0.132456789, 6)
+    assert _round_price(0.0) == 0.0
+    assert _round_price(-1.5) == -1.5

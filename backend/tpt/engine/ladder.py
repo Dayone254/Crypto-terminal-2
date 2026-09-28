@@ -176,6 +176,26 @@ def confirm_l2_structure(
         }
 
 
+def _round_price(value: float) -> float:
+    """Round a price, extending precision for sub-penny assets.
+
+    ``round(x, 6)`` destroys sub-penny assets: at PEPE's ~5e-06, entry, stop and
+    target all collapse onto the same float and the ladder degenerates to zero
+    risk distance (entry == SL == TP), which then poisons the signal row, the
+    Telegram alert and the evaluator's fill-anchored geometry. Below 0.1 the
+    decimal count grows to keep ~6 significant figures; at or above 0.1 the
+    historical round(x, 6) behavior is preserved exactly.
+    """
+    v = float(value)
+    if v <= 0:
+        return v
+    from math import floor, log10
+    magnitude = floor(log10(v))
+    sig_decimals = 5 - magnitude  # ~6 significant figures
+    decimals = max(6, sig_decimals)
+    return round(v, min(12, decimals))
+
+
 def compute_ladder(
     product_id: str,
     features: FeatureDict,
@@ -492,11 +512,11 @@ def compute_ladder(
     }
 
     res_dict = {
-        "tranche_a_price": round(tranche_a, 6),
-        "tranche_b_price": round(tranche_b, 6),
-        "stop_price": round(stop_price, 6),
-        "target_1_price": round(target_1, 6),
-        "target_2_price": round(target_2, 6),
+        "tranche_a_price": _round_price(tranche_a),
+        "tranche_b_price": _round_price(tranche_b),
+        "stop_price": _round_price(stop_price),
+        "target_1_price": _round_price(target_1),
+        "target_2_price": _round_price(target_2),
         "tranche_a_size_pct": tranche_a_size_pct,
         "tranche_b_size_pct": tranche_b_size_pct,
         "total_size_usd": total_size_usd,

@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 
+from tpt.data.database import get_connection
 from tpt.db.connection import AsyncSessionLocal
 from tpt.db.queries import get_latest_ladder_and_score
 from tpt.engine.belief import coverage_band
@@ -478,3 +479,104 @@ async def get_market_trade_history(product_id: str) -> list[dict[str, Any]]:
             last_added_price = price
 
         return history
+
+
+@router.get("/markets/{product_id}/trade-windows", response_model=list[dict[str, Any]])
+async def get_market_trade_windows(product_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Trade lifecycle windows for chart visualization.
+
+    Returns recent signals for the symbol with the timestamps the chart needs
+    to draw a position box that starts when the trade actually opened and ends
+    when it actually closed (or extends to now while it is still live):
+
+      - ``started_at_ms``: when the signal was created (or filled, if filled —
+        the position did not carry risk until the ladder filled).
+      - ``ended_at_ms``: partial exit / close time; null while the trade is
+        still live, so the frontend can extend the box to the current bar.
+      - ``status`` / ``final_status``: outcome (WIN/LOSS/BREAK_EVEN/
+        PARTIAL_WIN/ACTIVE_T2/PENDING) so boxes can be styled per outcome.
+      - ``trail_sl``: the evaluator's trailed stop, when present, so live boxes
+        show the stop where it actually ratcheted rather than the entry plan.
+      - ``tp_hit_at_ms`` / ``sl_hit_at_ms``: which level actually ended the
+        trade (partial exit = TP1 hit; final_status WIN/LOSS resolves the rest).
+    """
+    pid = product_id.upper()
+    safe_limit = max(1, min(int(limit), 100))
+    try:
+        async with get_connection() as conn:
+            conn.row_factory = None  # dict rows not needed; positional access below
+            async with conn.execute(
+                """
+                SELECT id, symbol, timestamp, score, label, trade_direction,
+                       entry_price, tp_price, tp2_price, sl_price, status,
+                       filled_at, fill_price, partial_exit_at, partial_exit_price,
+                       closed_at, final_status, trail_sl, position_size_usd
+                FROM signals
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (pid, safe_limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        windows: list[dict[str, Any]] = []
+        for r in rows:
+            (
+                sig_id, symbol, ts, score, label, direction,
+                entry_price, tp_price, tp2_price, sl_price, status,
+                filled_at, fill_price, partial_exit_at, partial_exit_price,
+                closed_at, final_status, trail_sl, position_size_usd,
+            ) = r
+
+            # The trade begins when the ladder actually filled — a PENDING
+            # signal carries no position risk yet. Fall back to creation time
+            # for rows that never filled (EXPIRED / L2_REJECTED cohorts still
+            # deserve a box: the plan existed even if the fill did not).
+            started_ms = (filled_at or ts) * 1000
+            # The box ends only on a FULL close. A partial exit (TP1 hit, row
+            # now ACTIVE_T2) is a marker along the way, not the end — the
+            # position is still live and the box must keep extending to the
+            # current bar until closed_at exists.
+            ended_ms = closed_at * 1000 if closed_at else None
+            partial_ms = partial_exit_at * 1000 if partial_exit_at else None
+            is_live = closed_at is None and status in ("PENDING", "ACTIVE_T2")
+
+            outcome = final_status or status
+            # Which level actually ended (or is ending) the trade: partial exit
+            # means TP1 was hit; a WIN means TP2 (or the trail) closed it; a
+            # LOSS means the stop did. Live trades show the live trail.
+            tp_hit = partial_exit_at is not None or outcome in ("WIN", "PARTIAL_WIN", "BREAK_EVEN")
+            sl_hit = outcome == "LOSS"
+
+            windows.append({
+                "id": sig_id,
+                "symbol": symbol,
+                "trade_direction": direction or "LONG",
+                "score": score,
+                "label": label,
+                "status": status,
+                "final_status": final_status,
+                "outcome": outcome,
+                "entry_price": fill_price if fill_price else entry_price,
+                "tp1_price": tp_price,
+                "tp2_price": tp2_price,
+                "sl_price": sl_price,
+                "current_sl": trail_sl if trail_sl else sl_price,
+                "partial_exit_price": partial_exit_price,
+                "position_size_usd": position_size_usd,
+                "started_at_ms": started_ms,
+                "ended_at_ms": ended_ms,
+                "tp1_hit_at_ms": partial_ms,
+                "is_live": is_live,
+                "tp_hit": tp_hit,
+                "sl_hit": sl_hit,
+            })
+        return windows
+    except Exception:
+        import logging
+        import traceback
+        logging.getLogger(__name__).error(
+            "trade-windows read failed for %s:\n%s", product_id, traceback.format_exc()
+        )
+        return []

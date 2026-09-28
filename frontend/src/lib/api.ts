@@ -252,6 +252,45 @@ export async function fetchMarketTradeHistory(productId: string): Promise<Histor
     return res.json();
 }
 
+/** A signal's real lifecycle window: when it opened, when (or whether) it closed. */
+export interface TradeWindow {
+    id: number | string;
+    symbol: string;
+    trade_direction: string;
+    score: number;
+    label: string;
+    status: string;
+    final_status: string | null;
+    /** Resolved outcome: WIN | LOSS | BREAK_EVEN | PARTIAL_WIN | ACTIVE_T2 | PENDING | EXPIRED ... */
+    outcome: string;
+    entry_price: number;
+    tp1_price: number;
+    tp2_price: number | null;
+    sl_price: number;
+    /** Live trailed stop when present, else the planned stop. */
+    current_sl: number;
+    partial_exit_price: number | null;
+    position_size_usd: number | null;
+    /** Trade start (fill if filled, else creation) in epoch ms. */
+    started_at_ms: number;
+    /** Full-close time in epoch ms; null while the trade is live. */
+    ended_at_ms: number | null;
+    /** When TP1 was partially exited (box continues to full close), if hit. */
+    tp1_hit_at_ms: number | null;
+    /** True while the position is still open (PENDING / ACTIVE_T2 without a close). */
+    is_live: boolean;
+    tp_hit: boolean;
+    sl_hit: boolean;
+}
+
+export async function fetchTradeWindows(productId: string, limit = 20): Promise<TradeWindow[]> {
+    const res = await apiFetch(
+        `/api/v1/markets/${encodeURIComponent(productId)}/trade-windows?limit=${limit}`
+    );
+    if (!res.ok) throw new Error(`Trade windows fetch failed: ${res.status}`);
+    return res.json();
+}
+
 // ── Watchlist endpoints ───────────────────────────────────────────────────────
 
 export async function fetchWatchlist(): Promise<WatchlistItem[]> {

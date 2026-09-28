@@ -23,6 +23,7 @@ import {
 import { apiFetch, FeatureMetrics, HistoricalSetup, LadderLevels, wsBase } from "@/lib/api";
 import { CANDLE_COLORS, CHART_COLORS } from "@/lib/chartColors";
 import { hasOrderBook, isDisabledFrame } from "@/lib/l2";
+import { fetchTradeWindows, TradeWindow } from "@/lib/api";
 
 // Register custom TradingView-style Position Tool overlay (Green Profit Rect + Red Risk Rect)
 try {
@@ -32,8 +33,17 @@ try {
         needDefaultPointFigure: false,
         needDefaultXAxisFigure: false,
         needDefaultYAxisFigure: false,
-        createPointFigures: ({ coordinates, bounding }) => {
+        createPointFigures: ({ coordinates, bounding, overlay }) => {
             if (!coordinates || coordinates.length < 3) return [];
+
+            // Outcome-aware styling via extendData — planned boxes keep the
+            // classic green/red; resolved trades restyle by result, live trades
+            // render blue so an open position reads differently from a plan.
+            const ext = (overlay?.extendData ?? {}) as any;
+            const profitFill = ext.profitColor ?? "rgba(16, 185, 129, 0.25)";
+            const riskFill = ext.riskColor ?? "rgba(244, 63, 94, 0.25)";
+            const profitBorder = ext.profitBorder ?? CHART_COLORS.pos;
+            const riskBorder = ext.riskBorder ?? CHART_COLORS.neg;
 
             const startX = coordinates[0]?.x ?? 0;
             const endX = coordinates[1]?.x ?? (startX + 120);
@@ -61,8 +71,8 @@ try {
                         height: profitHeight
                     },
                     styles: {
-                        color: "rgba(16, 185, 129, 0.25)",
-                        borderColor: CHART_COLORS.pos,
+                        color: profitFill,
+                        borderColor: profitBorder,
                         borderSize: 1
                     }
                 },
@@ -75,8 +85,8 @@ try {
                         height: riskHeight
                     },
                     styles: {
-                        color: "rgba(244, 63, 94, 0.25)",
-                        borderColor: CHART_COLORS.neg,
+                        color: riskFill,
+                        borderColor: riskBorder,
                         borderSize: 1
                     }
                 },
@@ -97,7 +107,7 @@ try {
                         coordinates: [{ x: startX, y: targetY }, { x: startX + width, y: targetY }]
                     },
                     styles: {
-                        color: CHART_COLORS.pos,
+                        color: profitBorder,
                         size: 2,
                         style: "solid"
                     }
@@ -119,12 +129,44 @@ try {
                         coordinates: [{ x: startX, y: stopY }, { x: startX + width, y: stopY }]
                     },
                     styles: {
-                        color: CHART_COLORS.neg,
+                        color: riskBorder,
                         size: 2,
                         style: "solid"
                     }
                 }
             ];
+        }
+    });
+
+    // Lifecycle event marker — a filled dot where something actually happened
+    // in a trade's timeline (TP1 partial exit, etc.). extendData: color, label.
+    registerOverlay({
+        name: "tradeMarker",
+        totalStep: 1,
+        needDefaultPointFigure: false,
+        needDefaultXAxisFigure: false,
+        needDefaultYAxisFigure: false,
+        createPointFigures: ({ coordinates, overlay }) => {
+            if (!coordinates || coordinates.length < 1) return [];
+            const x = coordinates[0]?.x ?? 0;
+            const y = coordinates[0]?.y ?? 0;
+            if (isNaN(x) || isNaN(y)) return [];
+            const ext = (overlay?.extendData ?? {}) as any;
+            const figures: any[] = [
+                {
+                    type: "circle",
+                    attrs: { x, y, r: ext.r ?? 4 },
+                    styles: { color: ext.color ?? "#eab308", style: "fill" }
+                }
+            ];
+            if (ext.label) {
+                figures.push({
+                    type: "text",
+                    attrs: { x: x + 7, y: y - 7, text: ext.label },
+                    styles: { color: ext.labelColor ?? "#e2e8f0", size: 10, family: "monospace" }
+                });
+            }
+            return figures;
         }
     });
 
@@ -367,6 +409,7 @@ export const NativeChart: React.FC<NativeChartProps> = ({
     const [granularity, setGranularity] = useState<number>(3600);
     const [isLive, setIsLive] = useState(false);
     const [showHistory, setShowHistory] = useState(false);
+    const [tradeWindows, setTradeWindows] = useState<TradeWindow[]>([]);
     const [showHeatmap, setShowHeatmap] = useState(true);
     const [showGexZones, setShowGexZones] = useState(true);
     const [gexData, setGexData] = useState<any>(optionsFlow || null);
@@ -380,6 +423,21 @@ export const NativeChart: React.FC<NativeChartProps> = ({
     const [activeSubIndicators, setActiveSubIndicators] = useState<string[]>(["VOL", "RSI"]);
     const [showIndicatorMenu, setShowIndicatorMenu] = useState(false);
     const [showPresetMenu, setShowPresetMenu] = useState(false);
+
+    // Fetch the symbol's real trade lifecycle windows (signals ledger). These
+    // drive the outcome-aware position boxes: start = fill, end = close, live
+    // trades extend to the current bar with their trailed stop.
+    useEffect(() => {
+        let isMounted = true;
+        const load = () => {
+            fetchTradeWindows(productId, 20)
+                .then((w) => { if (isMounted) setTradeWindows(w); })
+                .catch(() => { });
+        };
+        load();
+        const interval = setInterval(load, 30000); // refresh alongside ledger polls
+        return () => { isMounted = false; clearInterval(interval); };
+    }, [productId]);
 
     // Fetch / Sync live GEX data for the active symbol
     useEffect(() => {
@@ -718,7 +776,25 @@ export const NativeChart: React.FC<NativeChartProps> = ({
         const isShort = (activeSL && activeTrancheA && activeSL > activeTrancheA) || tradeDirection === "SHORT";
         const mainTP = (activeTP2 && activeTP2 > 0) ? activeTP2 : (activeTP1 || tpLevel);
 
-        if (activeTrancheA && mainTP && activeSL) {
+        // ── Trade lifecycle windows (real signals ledger) ──
+        // Each box: starts at fill (or signal creation), ends at full close; a
+        // live trade extends to the current bar and shows its trailed stop.
+        // Planned-box (no lifecycle data) falls back to the lookahead window.
+        const snapToCandle = (ms: number): number | null => {
+            if (!dataList || dataList.length === 0) return null;
+            let best: number | null = null;
+            let bestDiff = Infinity;
+            for (const c of dataList) {
+                const d = Math.abs(c.timestamp - ms);
+                if (d < bestDiff) { bestDiff = d; best = c.timestamp; }
+            }
+            // Only snap when a candle actually exists near the event (within
+            // one bar); otherwise clamp to the loaded range edges.
+            return bestDiff <= granularity * 1000 ? best : null;
+        };
+
+        const planBoxDrawn = !tradeWindows.length || showHistory;
+        if (planBoxDrawn && activeTrancheA && mainTP && activeSL) {
             let startTs: number;
             let futureTs: number;
             const targetMs = tradeTimestamp ? (tradeTimestamp > 1e11 ? tradeTimestamp : tradeTimestamp * 1000) : 0;
@@ -817,6 +893,9 @@ export const NativeChart: React.FC<NativeChartProps> = ({
             });
         }
 
+        // ── Historical plan boxes (HIST toggle) — ladder proposals, not trades ──
+        // Kept as a separate visual layer: fixed 4-bar footprint, faint styling,
+        // always inside the loaded candle range. The real trades draw above.
         if (showHistory && tradeHistory && tradeHistory.length > 0) {
             tradeHistory.forEach((hist) => {
                 const histTs = new Date(hist.computed_at).getTime();
@@ -824,17 +903,97 @@ export const NativeChart: React.FC<NativeChartProps> = ({
 
                 if (!isNaN(histTs) && hist.tranche_a_price && histTarget && hist.stop_price) {
                     const histEndTs = histTs + (4 * granularity * 1000);
+                    const clampedStart = snapToCandle(histTs);
+                    if (clampedStart === null) return; // outside loaded candles
+                    const clampedEndRaw = snapToCandle(histEndTs) ?? lastTs;
                     chart.createOverlay({
                         name: "positionTool",
                         points: [
-                            { timestamp: histTs, value: hist.tranche_a_price },
-                            { timestamp: histEndTs, value: histTarget },
-                            { timestamp: histEndTs, value: hist.stop_price }
-                        ]
+                            { timestamp: clampedStart, value: hist.tranche_a_price },
+                            { timestamp: clampedEndRaw, value: histTarget },
+                            { timestamp: clampedEndRaw, value: hist.stop_price }
+                        ],
+                        extendData: {
+                            profitColor: "rgba(16, 185, 129, 0.10)",
+                            riskColor: "rgba(244, 63, 94, 0.10)",
+                            profitBorder: "rgba(16, 185, 129, 0.45)",
+                            riskBorder: "rgba(244, 63, 94, 0.45)"
+                        }
                     });
                 }
             });
         }
+
+        // ── Real trade lifecycle boxes (signals ledger) ──
+        // Box spans fill → close exactly; live trades extend to the current
+        // bar. Outcome-colored: WIN green, LOSS red, BREAK_EVEN gray,
+        // PARTIAL_WIN/ACTIVE_T2 teal, PENDING blue. TP1 partial exit draws a
+        // yellow marker. Live boxes use the evaluator's trailed stop.
+        tradeWindows.forEach((w) => {
+            const startSnap = snapToCandle(w.started_at_ms) ?? dataList[0].timestamp;
+            const endTs = w.is_live || w.ended_at_ms === null
+                ? lastTs
+                : (snapToCandle(w.ended_at_ms) ?? lastTs);
+            if (endTs <= startSnap) return;
+
+            const entry = w.entry_price > 0 ? w.entry_price : activeTrancheA;
+            const stop = w.is_live && w.current_sl ? w.current_sl : w.sl_price;
+            const takeProfit = (w.tp2_price && w.tp2_price > 0) ? w.tp2_price : w.tp1_price;
+            if (!entry || !stop || !takeProfit) return;
+
+            let profitColor: string = "rgba(16, 185, 129, 0.25)";
+            let riskColor: string = "rgba(244, 63, 94, 0.25)";
+            let profitBorder: string = CHART_COLORS.pos;
+            let riskBorder: string = CHART_COLORS.neg;
+            const oc = w.outcome;
+            if (oc === "WIN") {
+                profitColor = "rgba(16, 185, 129, 0.40)";
+                riskColor = "rgba(244, 63, 94, 0.07)";
+            } else if (oc === "LOSS") {
+                profitColor = "rgba(16, 185, 129, 0.07)";
+                riskColor = "rgba(244, 63, 94, 0.40)";
+            } else if (oc === "BREAK_EVEN") {
+                profitColor = "rgba(148, 163, 184, 0.20)";
+                riskColor = "rgba(148, 163, 184, 0.10)";
+                profitBorder = "rgba(148, 163, 184, 0.7)";
+                riskBorder = "rgba(148, 163, 184, 0.7)";
+            } else if (oc === "PARTIAL_WIN" || oc === "ACTIVE_T2") {
+                profitColor = "rgba(45, 212, 191, 0.30)";
+                profitBorder = "#2dd4bf";
+            } else if (oc === "PENDING") {
+                profitColor = "rgba(56, 189, 248, 0.25)";
+                riskColor = "rgba(56, 189, 248, 0.12)";
+                profitBorder = "#38bdf8";
+                riskBorder = "rgba(56, 189, 248, 0.7)";
+            }
+
+            chart.createOverlay({
+                name: "positionTool",
+                points: [
+                    { timestamp: startSnap, value: entry },
+                    { timestamp: endTs, value: takeProfit },
+                    { timestamp: endTs, value: stop }
+                ],
+                extendData: {
+                    profitColor,
+                    riskColor,
+                    profitBorder,
+                    riskBorder
+                }
+            });
+
+            // TP1 partial-exit marker at the moment it actually happened.
+            if (w.tp1_hit_at_ms) {
+                const tp1Snap = snapToCandle(w.tp1_hit_at_ms);
+                if (tp1Snap !== null) {
+                    chart.createOverlay({
+                        name: "tradeMarker",
+                        points: [{ timestamp: tp1Snap, value: w.tp1_price || entry }],
+                        extendData: { color: "#eab308", label: "TP1" }
+                    });
+                }
+            }
+        });
 
         if (features) {
             if (features.swing_high_7d && features.swing_high_7d > 0) {
@@ -939,7 +1098,7 @@ export const NativeChart: React.FC<NativeChartProps> = ({
                 });
             }
         }
-    }, [productId, entryLevel, tpLevel, slLevel, tradeTimestamp, features, ladder, tradeHistory, tradeDirection, showHistory, showGexZones, gexData, granularity, candlesLoadedCount]);
+    }, [productId, entryLevel, tpLevel, slLevel, tradeTimestamp, features, ladder, tradeHistory, tradeWindows, tradeDirection, showHistory, showGexZones, gexData, granularity, candlesLoadedCount]);
 
     // Live Data WebSocket (Candles)
     useEffect(() => {

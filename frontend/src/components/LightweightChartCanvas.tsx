@@ -47,6 +47,10 @@ export const LightweightChartCanvas: React.FC<LightweightChartCanvasProps> = ({
     const chartRef = useRef<IChartApi | null>(null);
     const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
     const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+    // Track created price lines so the ladder effect can remove them before
+    // redrawing — without this, every ladder update stacked a new set of
+    // ENTRY/SL/TP lines on top of the old ones (a visible rendering leak).
+    const priceLinesRef = useRef<any[]>([]);
 
     useEffect(() => {
         if (!chartContainerRef.current) return;
@@ -144,13 +148,23 @@ export const LightweightChartCanvas: React.FC<LightweightChartCanvasProps> = ({
 
     // Render Setup Limit Ladder (Entry, Stop Loss, TP1-3)
     useEffect(() => {
-        if (!candleSeriesRef.current) return;
+        const candleSeries = candleSeriesRef.current;
+        if (!candleSeries) return;
 
-        // Clear previous price lines if any
-        // (Price lines in lightweight-charts are attached to series)
+        // Remove the previous ladder's lines before drawing the new set —
+        // price lines are attached to the series and otherwise accumulate.
+        priceLinesRef.current.forEach((line) => {
+            try { candleSeries.removePriceLine(line); } catch { /* already detached */ }
+        });
+        priceLinesRef.current = [];
+
         if (ladder) {
+            const addLine = (opts: any) => {
+                priceLinesRef.current.push(candleSeries.createPriceLine(opts));
+            };
+
             // Entry Line
-            candleSeriesRef.current.createPriceLine({
+            addLine({
                 price: ladder.entryPrice,
                 color: "#38BDF8",
                 lineWidth: 2,
@@ -160,7 +174,7 @@ export const LightweightChartCanvas: React.FC<LightweightChartCanvasProps> = ({
             });
 
             // Stop Loss Line
-            candleSeriesRef.current.createPriceLine({
+            addLine({
                 price: ladder.stopLoss,
                 color: "#EF4444",
                 lineWidth: 2,
@@ -170,7 +184,7 @@ export const LightweightChartCanvas: React.FC<LightweightChartCanvasProps> = ({
             });
 
             // Take Profit 1 Line
-            candleSeriesRef.current.createPriceLine({
+            addLine({
                 price: ladder.tp1,
                 color: "#10B981",
                 lineWidth: 2,
@@ -180,7 +194,7 @@ export const LightweightChartCanvas: React.FC<LightweightChartCanvasProps> = ({
             });
 
             if (ladder.tp2) {
-                candleSeriesRef.current.createPriceLine({
+                addLine({
                     price: ladder.tp2,
                     color: "#059669",
                     lineWidth: 1,
