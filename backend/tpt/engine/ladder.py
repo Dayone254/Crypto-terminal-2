@@ -372,7 +372,10 @@ def compute_ladder(
 
         rr_a_t1 = (tranche_a - target_1) / risk if risk > 0 else 0.0
         rr_a_t2 = (tranche_a - target_2) / risk if risk > 0 else 0.0
-        basis_str_info = {"fib_mid": round(fib_mid, 8), "vwap_pocket": round(vwap_pocket, 8), "fib_786": round(fib_236, 8)}
+        # The SHORT structural resistance is fib_236 (tranche_b = max(fib_236,
+        # swing_high)). This key used to be mislabeled "fib_786" while storing
+        # fib_236's value, so the basis prose described a level the plan did not use.
+        basis_str_info = {"fib_mid": round(fib_mid, 8), "vwap_pocket": round(vwap_pocket, 8), "fib_236": round(fib_236, 8)}
 
     else:
         # LONG Logic
@@ -548,7 +551,10 @@ def format_ladder_text(
     b_pct_s = f"{b_pct:.0f}" if isinstance(b_pct, (int, float)) else "40"
 
     basis = ladder.get("basis", {})
-    basis_str = f"VWAP pocket {_fmt(basis.get('vwap_pocket'))} + Macro {_fmt(basis.get('fib_786'))}"
+    # Direction-aware structural level: LONG ladders carry fib_786 (support side),
+    # SHORT ladders carry fib_236 (resistance side) — see the SHORT basis fix.
+    macro_level = basis.get("fib_786") if basis.get("fib_786") is not None else basis.get("fib_236")
+    basis_str = f"VWAP pocket {_fmt(basis.get('vwap_pocket'))} + Macro {_fmt(macro_level)}"
     stop_lgc = basis.get('stop_logic', '')
     tp1_lgc = basis.get('tp1_logic', '')
 

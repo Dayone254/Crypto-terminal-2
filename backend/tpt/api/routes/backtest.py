@@ -89,6 +89,22 @@ def _excursion_summary(closed_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+@router.get("/component-feedback")
+async def component_feedback_route():
+    """Per-scoring-component hit rates over closed trades.
+
+    The conditioning question the ledger exists to answer: which weighted
+    components actually fire on winners above the base rate?
+    """
+    try:
+        from tpt.engine.feedback import get_component_feedback
+        rows = await get_component_feedback()
+        return {"components": rows, "count": len(rows)}
+    except Exception:
+        logger.error("component_feedback read failed:\n%s", traceback.format_exc())
+        return {"components": [], "count": 0, "error": "Failed to load component feedback."}
+
+
 @router.get("/stats")
 async def backtest_stats(
     pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0")

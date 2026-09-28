@@ -103,6 +103,12 @@ def test_macro_beta_headwind_is_priced_not_vetoed() -> None:
     >=60 and averaging 79.9. The hostility is now a penalty in proportion to its
     magnitude, so an exceptional setup can still clear the entry gate while a
     marginal one still cannot.
+
+    The gate here is the REGIME-ADJUSTED one (55 for a LONG in TRENDING_UP),
+    matching effective_min_score in labeler.py — which is what both the labeler
+    and the runner's post-label promotion apply. The old assertion against the
+    raw 60 passed only because rs_vs_btc_7d was double-counted: a weighted
+    component AND an additive rs_btc_bonus on the same number.
     """
     feats = _strong_long_features(rs_7d=30.0)
 
@@ -117,7 +123,9 @@ def test_macro_beta_headwind_is_priced_not_vetoed() -> None:
     # ... exactly the configured maximum at full headwind.
     assert abs(calm["clamped"] - dump["clamped"] - 18.0) < 0.01
     # ... but the strongest relative performer still clears the entry gate.
-    assert dump["clamped"] >= 60.0
+    from tpt.engine.labeler import effective_min_score
+    from tpt.config.strategy import LabelingConfig
+    assert dump["clamped"] >= effective_min_score(LabelingConfig(), "TRENDING_UP", "LONG")
 
 
 def test_macro_beta_headwind_saturates_and_scales() -> None:

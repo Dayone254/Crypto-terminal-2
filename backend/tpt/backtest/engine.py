@@ -212,7 +212,16 @@ def simulate_trade_execution(
     future_candles_1h: list[list[Any]],
     max_hold_bars: int = 72,
 ) -> BacktestTradeResult | None:
-    """Simulate execution of a generated backtest setup against subsequent 1h bars."""
+    """Simulate execution of a generated backtest setup against subsequent 1h bars.
+
+    Two-phase, mirroring the live evaluator's geometry: a TP1 touch banks the
+    partial-exit R and moves the stop to entry — it does NOT teleport the trade
+    to T2. The remaining tail is then governed by a 3-ATR Chandelier trail (the
+    live post-T1 rule): it either reaches T2 (WIN), trails out (PARTIAL_WIN),
+    or rides back to the break-even stop (BREAK_EVEN). The previous simulation
+    jumped straight from "TP1 touched" to "T2 hit" on the same bar, which
+    overstated the WIN rate of every candidate walk-forward ever ranked.
+    """
     ladder = setup["ladder"]
     direction = setup["trade_direction"]
     entry = float(ladder["tranche_a_price"])
@@ -230,6 +239,10 @@ def simulate_trade_execution(
     status = "EXPIRED"
     realized_r = 0.0
 
+    # Post-TP1 state: banked partial R + trailing regime.
+    partial_r: float | None = None
+    trail_stop: float | None = None
+
     for bar in future_candles_1h[:max_hold_bars]:
         bars += 1
         high = float(bar[2])
@@ -243,22 +256,43 @@ def simulate_trade_execution(
             if unfav > mae:
                 mae = unfav
 
-            # Check stop loss
-            if low <= stop:
-                status = "LOSS"
-                realized_r = -1.0
-                break
-            # Check TP2
-            elif high >= tp2:
-                status = "WIN"
-                realized_r = abs(tp2 - entry) / risk
-                break
-            # Check TP1
-            elif high >= tp1:
-                status = "PARTIAL_WIN"
-                realized_r = abs(tp1 - entry) / risk
-                # Stop moves to breakeven
-                stop = entry
+            if partial_r is None:
+                # Check stop loss
+                if low <= stop:
+                    status = "LOSS"
+                    realized_r = -1.0
+                    break
+                # Check TP2 first (a single bar can span both)
+                elif high >= tp2:
+                    status = "WIN"
+                    realized_r = abs(tp2 - entry) / risk
+                    break
+                # Check TP1
+                elif high >= tp1:
+                    partial_r = abs(tp1 - entry) / risk
+                    stop = entry  # stop to breakeven
+                    trail_stop = high - 3.0 * risk  # provisional; refined below
+                    continue
+            else:
+                # Chandelier trail from the highest high seen since TP1.
+                trail_stop = max(trail_stop or entry, high - 3.0 * risk)
+
+                if high >= tp2:
+                    status = "WIN"
+                    realized_r = partial_r + abs(tp2 - tp1) / risk  # tail exits at T2
+                    break
+                elif low <= trail_stop:
+                    # Trailed exit of the remaining leg: somewhere between the
+                    # break-even floor and the highest high minus 3R.
+                    exit_r = max((trail_stop - entry) / risk, 0.0)
+                    realized_r = partial_r + exit_r
+                    status = "PARTIAL_WIN" if realized_r > 0.05 else "BREAK_EVEN"
+                    break
+                elif low <= stop:
+                    # Back to the break-even stop: keep the banked partial only.
+                    realized_r = partial_r
+                    status = "PARTIAL_WIN"
+                    break
         else:  # SHORT
             fav = entry - low
             unfav = high - entry
@@ -267,21 +301,39 @@ def simulate_trade_execution(
             if unfav > mae:
                 mae = unfav
 
-            # Check stop loss
-            if high >= stop:
-                status = "LOSS"
-                realized_r = -1.0
-                break
-            # Check TP2
-            elif low <= tp2:
-                status = "WIN"
-                realized_r = abs(entry - tp2) / risk
-                break
-            # Check TP1
-            elif low <= tp1:
-                status = "PARTIAL_WIN"
-                realized_r = abs(entry - tp1) / risk
-                stop = entry
+            if partial_r is None:
+                # Check stop loss
+                if high >= stop:
+                    status = "LOSS"
+                    realized_r = -1.0
+                    break
+                # Check TP2 first (a single bar can span both)
+                elif low <= tp2:
+                    status = "WIN"
+                    realized_r = abs(entry - tp2) / risk
+                    break
+                # Check TP1
+                elif low <= tp1:
+                    partial_r = abs(entry - tp1) / risk
+                    stop = entry
+                    trail_stop = low + 3.0 * risk
+                    continue
+            else:
+                trail_stop = min(trail_stop or entry, low + 3.0 * risk)
+
+                if low <= tp2:
+                    status = "WIN"
+                    realized_r = partial_r + abs(tp1 - tp2) / risk
+                    break
+                elif high >= trail_stop:
+                    exit_r = max((entry - trail_stop) / risk, 0.0)
+                    realized_r = partial_r + exit_r
+                    status = "PARTIAL_WIN" if realized_r > 0.05 else "BREAK_EVEN"
+                    break
+                elif high >= stop:
+                    realized_r = partial_r
+                    status = "PARTIAL_WIN"
+                    break
 
     mfe_r = round(mfe / risk, 2) if risk > 0 else 0.0
     mae_r = round(mae / risk, 2) if risk > 0 else 0.0
@@ -289,9 +341,12 @@ def simulate_trade_execution(
     if status == "EXPIRED":
         final_close = float(future_candles_1h[min(bars - 1, len(future_candles_1h) - 1)][4]) if future_candles_1h else entry
         if direction == "LONG":
-            realized_r = (final_close - entry) / risk
+            tail_r = (final_close - entry) / risk
         else:
-            realized_r = (entry - final_close) / risk
+            tail_r = (entry - final_close) / risk
+        # A banked TP1 partial survives expiry — the trade only ever expires
+        # because the data window ended, not because the position was lost.
+        realized_r = (partial_r + max(0.0, tail_r)) if partial_r is not None else tail_r
         if realized_r > 0:
             status = "PARTIAL_WIN"
         elif realized_r < -0.5:

@@ -20,6 +20,29 @@ from tpt.engine.features import FeatureDict
 
 Label = Literal["SKIP", "CHASE", "ENTRY_ZONE", "COILED", "EARLY", "WATCH"]
 
+
+def effective_min_score(
+    config: LabelingConfig | None,
+    regime: str = "TRENDING_UP",
+    trade_direction: str = "LONG",
+) -> float:
+    """The regime-adjusted entry score gate the labeler itself uses.
+
+    Exposed so post-label re-classification (the runner's tranche-A proximity
+    promotion of COILED → ENTRY_ZONE) applies the SAME gate instead of silently
+    re-admitting setups under the raw `min_composite_score`, which bypassed the
+    +10 VOLATILE tightening and the ±5 trend-aligned relaxation.
+    """
+    cfg = config or LabelingConfig()
+    eff = cfg.min_composite_score
+    if regime == "VOLATILE":
+        eff += 10.0
+    elif regime == "TRENDING_UP" and trade_direction == "LONG":
+        eff -= 5.0
+    elif regime == "TRENDING_DOWN" and "SHORT" in trade_direction:
+        eff -= 5.0
+    return eff
+
 # Pre-breakout coil detection constants
 # A Bollinger Band width below this on the 1h is a confirmed volatility squeeze.
 BB_SQUEEZE_THRESH = 0.04
@@ -115,14 +138,9 @@ def label(
     early_change_min = config.early_change_min if config else 2.0
     early_pos_max = config.early_pos_max if config else 0.75
     
-    # Dynamic entry score based on regime
-    eff_min_score = config.min_composite_score if config else 60.0
-    if regime == "VOLATILE":
-        eff_min_score += 10.0  # Require higher score (70.0) in volatile regimes
-    elif regime == "TRENDING_UP" and trade_direction == "LONG":
-        eff_min_score -= 5.0   # Relax slightly if trend aligned
-    elif regime == "TRENDING_DOWN" and trade_direction == "SHORT":
-        eff_min_score -= 5.0
+    # Dynamic entry score based on regime — the single definition, shared with
+    # the runner's post-label promotion path via `effective_min_score`.
+    eff_min_score = effective_min_score(config, regime, trade_direction)
 
     # NOTE: the macro beta gate that used to live here — returning SKIP for every
     # LONG while BTC dumped, and every SHORT while it pumped — has moved into the

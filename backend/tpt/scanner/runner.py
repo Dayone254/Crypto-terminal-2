@@ -29,6 +29,7 @@ from typing import Any
 from sqlalchemy import select
 
 from tpt.adapters.coinbase import CoinbaseAdapter
+from tpt.backtest.shadow_engine import evaluate_shadow_candidates, persist_shadow_signals
 from tpt.config.settings import settings
 from tpt.config.strategy import StrategyConfig, load_strategy
 from tpt.data.database import get_connection
@@ -38,7 +39,7 @@ from tpt.db.write_lock import db_write_lock
 from tpt.engine.belief import FEATURE_VERSION, serialize_feature_vector
 from tpt.engine.exits import TargetEstimate, calibrate_targets
 from tpt.engine.features import FeatureDict, compute_features, multi_horizon_returns
-from tpt.engine.labeler import compute_tags, label
+from tpt.engine.labeler import compute_tags, effective_min_score, label
 from tpt.engine.ladder import compute_ladder, confirm_l2_structure, sanitize_ladder_dict
 from tpt.engine.regime import beta_state_from_thrust, detect_regime, macro_thrust
 from tpt.engine.scorer import ScoreBreakdown, score
@@ -84,7 +85,10 @@ async def _calibrated_target() -> TargetEstimate:
     """
     sql = (
         "SELECT entry_price, sl_price, mfe, mae FROM signals "
-        "WHERE status IN ('WIN', 'LOSS', 'BREAK_EVEN', 'PARTIAL_WIN')"
+        "WHERE status IN ('WIN', 'LOSS', 'BREAK_EVEN', 'PARTIAL_WIN') "
+        # Shadow-mode rows are recorded under their candidate's pipeline version
+        # and must never steer the live ladder's target calibration.
+        "AND pipeline_version NOT IN (SELECT pipeline_version FROM shadow_pipelines)"
     )
     try:
         async with get_connection() as conn, conn.execute(sql) as cur:
@@ -144,7 +148,10 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
             for row in rows:
                 pid = row[1]
                 async with conn.execute(
-                    "SELECT id FROM signals WHERE symbol=? AND status='PENDING' AND CAST(timestamp AS INTEGER) > ?",
+                    # Scoped to live pipelines: a staged candidate's PENDING row
+                    # must never suppress the live insert (and vice versa).
+                    "SELECT id FROM signals WHERE symbol=? AND status='PENDING' AND CAST(timestamp AS INTEGER) > ? "
+                    "AND pipeline_version NOT IN (SELECT pipeline_version FROM shadow_pipelines)",
                     (pid, four_hours_ago),
                 ) as cur:
                     already_exists = await cur.fetchone()
@@ -152,8 +159,8 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
                     continue
                 await conn.execute(
                     """INSERT INTO signals
-                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price, pipeline_version)
-                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price, position_size_usd, pipeline_version)
+                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     row,
                 )
                 inserted += 1
@@ -174,12 +181,59 @@ async def _persist_rejected_signals(rows: list[tuple[Any, ...]]) -> None:
             for row in rows:
                 await conn.execute(
                     """INSERT INTO signals
-                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price, status, pipeline_version)
-                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?, 'L2_REJECTED', ?)""",
+                    (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction, entry_price, tp_price, tp2_price, sl_price, position_size_usd, status, pipeline_version)
+                    VALUES (?, ?, strftime('%s', 'now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'L2_REJECTED', ?)""",
                     row,
                 )
             await conn.commit()
     logger.info("Persisted %d L2_REJECTED signal row(s) for historical auditing.", len(rows))
+
+
+def _load_staged_shadow_configs(
+    base_cfg: StrategyConfig, target_r: float | None
+) -> list[tuple[str, str, StrategyConfig, float | None]]:
+    """Staged shadow candidates as (pipeline_version, name, config copy, target_r).
+
+    Each candidate gets a deep copy of the live strategy config with its staged
+    overrides applied (the same fields walk-forward candidates vary), so shadow
+    evaluation runs the candidate's actual policy — not a relabeled copy of the
+    live one. PROMOTED/DISCARDED pipelines are excluded; only STAGED and
+    ELIGIBLE collect new samples.
+    """
+    import copy as _copy
+
+    staged: list[tuple[str, str, StrategyConfig, float | None]] = []
+    try:
+        from tpt.backtest.shadow import list_staged_shadow_pipelines
+        pipelines = list_staged_shadow_pipelines()
+    except Exception as exc:
+        logger.debug("Shadow candidate load failed: %s", exc)
+        return staged
+
+    for p in pipelines:
+        pv = p.get("pipeline_version")
+        if not pv or p.get("status") not in ("STAGED", "ELIGIBLE"):
+            continue
+        cand_cfg = _copy.deepcopy(base_cfg)
+        conf = p.get("config") or {}
+        try:
+            cand_cfg.labeling.min_composite_score = float(
+                conf.get("min_composite_score", cand_cfg.labeling.min_composite_score)
+            )
+            cand_cfg.labeling.min_quote_volume = float(
+                conf.get("min_quote_volume", cand_cfg.labeling.min_quote_volume)
+            )
+            cand_cfg.ladder.atr_stop_mult = float(
+                conf.get("atr_stop_mult", cand_cfg.ladder.atr_stop_mult)
+            )
+        except Exception as exc:
+            logger.debug("Shadow candidate %s config invalid, skipping: %s", pv, exc)
+            continue
+        staged.append((pv, p.get("candidate_name") or pv, cand_cfg, target_r))
+
+    if staged:
+        logger.info("Shadow mode: %d staged candidate(s) collecting samples.", len(staged))
+    return staged
 
 
 _scan_lock = asyncio.Lock()
@@ -249,6 +303,9 @@ async def _execute_scan(
             calibration.n,
             calibration.reason or "",
         )
+
+    # Shadow candidates are resolved once per scan against the live evidence.
+    staged_shadow = _load_staged_shadow_configs(cfg, target_r)
 
     own_adapter = adapter is None
     if adapter is None:
@@ -395,6 +452,7 @@ async def _execute_scan(
         candidates_out: list[dict[str, Any]] = []
         pending_signals: list[tuple[Any, ...]] = []
         l2_rejected_signals: list[tuple[Any, ...]] = []
+        shadow_records: list[dict[str, Any]] = []
         telegram_alerts: list[dict[str, Any]] = []
         snapshot_rows: list[dict[str, Any]] = []
         feature_rows: list[dict[str, Any]] = []
@@ -562,7 +620,12 @@ async def _execute_scan(
                 current_price = feats.get("last_price")
                 if t_a and current_price:
                     near_tranche_a = abs(float(current_price) - float(t_a)) / float(t_a) <= 0.0075
-                    if near_tranche_a and comp_score >= cfg.labeling.min_composite_score:
+                    # Same regime-adjusted gate the labeler uses — the raw
+                    # min_composite_score let setups slip past the +10 VOLATILE
+                    # tightening here.
+                    if near_tranche_a and comp_score >= effective_min_score(
+                        cfg.labeling, current_regime, trade_direction
+                    ):
                         primary_label = "ENTRY_ZONE"
                     elif primary_label == "ENTRY_ZONE":
                         primary_label = "COILED"
@@ -693,6 +756,8 @@ async def _execute_scan(
                             san["target_1_price"],
                             san.get("target_2_price") or san["target_1_price"],
                             san["stop_price"],
+                            # Position the plan called for (constant-dollar risk sizing).
+                            float(ladder_dict.get("total_size_usd") or 0.0),
                             "v2.0"
                         ))
                         continue
@@ -704,8 +769,28 @@ async def _execute_scan(
                         san["target_1_price"],
                         san.get("target_2_price") or san["target_1_price"],
                         san["stop_price"],
+                        # Position the plan called for (constant-dollar risk sizing).
+                        float(ladder_dict.get("total_size_usd") or 0.0),
                         "v2.0"
                     ))
+
+                    # Shadow mode: re-decide THIS setup under each staged
+                    # candidate's config and record the candidate's conclusion
+                    # under its own pipeline_version. Zero extra market data —
+                    # the evidence was already paid for.
+                    if staged_shadow:
+                        shadow_records.extend(evaluate_shadow_candidates(
+                            staged=staged_shadow,
+                            product_id=pid,
+                            features=feats,
+                            composite_score=comp_score,
+                            score_dict=score_dict,
+                            trade_direction=trade_direction,
+                            regime=current_regime,
+                            pinned=pinned,
+                            target_r=target_r,
+                            scan_run_id=scan_run_id,
+                        ))
                     telegram_alerts.append({
                         "symbol": pid,
                         "score": comp_score,
@@ -806,6 +891,14 @@ async def _execute_scan(
                 await send_setup_alert(**alert)
             except Exception as exc:
                 logger.warning("Telegram alert failed for %s: %s", alert["symbol"], exc)
+
+        # Shadow-mode rows persist after the live commit, under the same write
+        # lock discipline. Failures here must never fail the scan.
+        if shadow_records:
+            try:
+                await persist_shadow_signals(shadow_records)
+            except Exception as exc:
+                logger.warning("Shadow signal persistence failed: %s", exc)
 
         # --- Live L2 buffer management (bounded, prioritised) ---
         # Pinned symbols first, then the highest-scoring candidates, hard-capped:

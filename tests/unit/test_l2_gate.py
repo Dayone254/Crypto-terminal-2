@@ -88,7 +88,8 @@ def test_persist_rejected_signals_row():
                 tp2_price REAL,
                 sl_price REAL,
                 status TEXT,
-                pipeline_version TEXT
+                pipeline_version TEXT,
+                position_size_usd REAL
             )"""
         )
         conn.execute("DELETE FROM signals WHERE status = 'L2_REJECTED'")
@@ -97,7 +98,9 @@ def test_persist_rejected_signals_row():
     rejected_row = (
         "scan_test_123", "SOL-USD", 72.5,
         '{"l2_gate_result": {"passed": false, "reason": "NO_L2_BID_DATA"}}',
-        "ENTRY_ZONE", "LONG", 150.0, 160.0, 165.0, 145.0, "v2.0"
+        "ENTRY_ZONE", "LONG", 150.0, 160.0, 165.0, 145.0,
+        1200.0,  # position_size_usd — the plan's intended size, captured at insert
+        "v2.0"
     )
     asyncio.run(_persist_rejected_signals([rejected_row]))
 

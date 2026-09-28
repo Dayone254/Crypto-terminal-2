@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Relative strength is measured on the 7-day horizon (see features.py) so that it
 # is not an affine copy of the 24h trend component. A 7d outperformance of
-# `RS_7D_SCALE` percent is treated as a full-strength signal.
+# `RS_7D_SCALE` percent is treated as a full-strength signal. It is carried ONLY
+# by the weighted `relative_strength` component — the old additive rs_btc_bonus
+# (up to ±15 on the same measure) was removed as double-counting.
 RS_7D_SCALE = 8.0
-# Points awarded per percent of 7d outperformance, capped at the historical 15.
-RS_7D_BONUS_FACTOR = 1.5
 
 ScoreBreakdown = dict[str, Any]
 
@@ -451,30 +451,16 @@ def score(
     except Exception as _cex:
         logger.debug("[scorer] catalyst boost skipped: %s", _cex)
 
-    # 8. Multi-Horizon Relative Strength (7d, 30d, 60d vs BTC)
-    rs = rs_vs_btc_7d
+    # ── Medium-Term Relative Strength (30d/60d vs BTC) ──
+    #
+    # The 7d RS additive bonus used to sit here too (up to ±15), on top of the
+    # weighted `relative_strength` component that already reads rs_vs_btc_7d
+    # AND the pre-breakout coil bonus that reads rs_vs_btc_1h: one signal,
+    # counted three times. The weighted component carries the 7d horizon now;
+    # what remains is the medium-term cohort the components don't cover —
+    # underperforming alts carry amplified downside beta in short-gamma tapes.
     rs_30d = features.get("rs_vs_btc_30d")
     rs_60d = features.get("rs_vs_btc_60d")
-
-    # 7d Short-term Relative Strength
-    if rs is not None and rs > 2.0:
-        if trade_direction == "LONG":
-            bonus = min(15.0, rs * RS_7D_BONUS_FACTOR)
-            features_ix += bonus
-            components_dump["rs_btc_bonus"] = bonus
-        else:
-            penalty = min(15.0, rs * RS_7D_BONUS_FACTOR)
-            features_ix -= penalty
-            components_dump["rs_btc_short_penalty"] = -penalty
-    elif rs is not None and rs < -2.0:
-        if trade_direction == "SHORT":
-            bonus = min(15.0, abs(rs) * RS_7D_BONUS_FACTOR)
-            features_ix += bonus
-            components_dump["rs_btc_weakness_bonus"] = bonus
-        else:
-            penalty = min(15.0, abs(rs) * RS_7D_BONUS_FACTOR)
-            features_ix -= penalty
-            components_dump["rs_btc_long_penalty"] = -penalty
 
     # 30-60 Day Medium-Term Altcoin Underperformance Multiplier
     # Underperforming altcoins have high downside beta when BTC breaks down in Short Gamma regimes

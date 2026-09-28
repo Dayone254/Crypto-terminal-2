@@ -1,7 +1,24 @@
-"""Walk-forward validation engine — rolling window evaluation and candidate ranking."""
+"""Walk-forward validation engine — rolling window evaluation and candidate ranking.
+
+Methodology notes (fixes applied):
+- Granularity honesty: the loader used to fetch only 900s candles and hand them
+  to the evaluator as "1h" bars (stepping [::12] called them 12h). Every "1h"
+  indicator in every historical result was therefore computed on 15-minute data.
+  Windows are now driven by true 1h bars by default; a 15m dataset is loaded
+  separately as context and sliced strictly to the evaluation timestamp.
+- Zero look-ahead in auxiliary slices: the 15m slice is cut at the last bar
+  whose close time is <= the evaluation bar's close. Daily slices are only used
+  when a daily archive exists, and only up to the last *closed* daily bar.
+- Train → test coupling: threshold-only candidates are no longer decorative.
+  Each window's train span is replayed, the EV-maximising minimum score is
+  estimated from those train trades, and the test span is evaluated under that
+  calibrated threshold. The train window always precedes the test window, so
+  the calibration sees no future data.
+"""
 from __future__ import annotations
 
-import logging, math
+import copy
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -10,6 +27,8 @@ from tpt.backtest.storage import SURVIVORSHIP_BIAS_NOTE, load_historical_candles
 from tpt.config.strategy import StrategyConfig, load_strategy
 
 logger = logging.getLogger(__name__)
+
+_VALID_GRANULARITY = (60, 900, 3600, 21600, 86400)
 
 
 @dataclass
@@ -81,20 +100,62 @@ def generate_rolling_windows(
     return windows
 
 
-import copy
+def _calibrate_min_score(
+    train_rows: list[dict[str, Any]],
+    fallback: float,
+    *,
+    min_cohort: int = 20,
+    min_train_trades: int = 40,
+) -> float | None:
+    """EV-maximising minimum score from train-window trades, or None.
+
+    Refuses to answer below ``min_train_trades`` closed train trades — with
+    fewer, the "optimal" threshold is noise. The answer is clamped into
+    ``[max(45, fallback-10), fallback+15]`` so the calibration sharpens a
+    candidate's own identity instead of wandering into an untested regime.
+    """
+    if len(train_rows) < min_train_trades:
+        return None
+
+    best_ev: float | None = None
+    best_thr: float | None = None
+    for thr in sorted({round(float(r["score"])) for r in train_rows}):
+        cohort = [r for r in train_rows if float(r["score"]) >= thr]
+        if len(cohort) < min_cohort:
+            continue
+        ev = sum(float(r["realized_r"]) for r in cohort) / len(cohort)
+        if best_ev is None or ev > best_ev:
+            best_ev = ev
+            best_thr = float(thr)
+
+    if best_thr is None:
+        return None
+
+    lo = max(45.0, fallback - 10.0)
+    hi = fallback + 15.0
+    return round(min(max(best_thr, lo), hi), 1)
+
+
 from tpt.strategies.base import BaseStrategy
 from tpt.strategies.registry import get_all_strategies, get_strategy_by_id
+
 
 def run_walk_forward_backtest(
     symbols: list[str],
     candidates: list[StrategyCandidateConfig] | None = None,
     strategies: list[BaseStrategy] | None = None,
-    granularity: int = 900,
+    granularity: int = 3600,
     train_days: int = 365,
     test_days: int = 90,
     step_days: int = 90,
 ) -> list[WalkForwardCandidateResult]:
-    """Execute walk-forward validation across candidate strategy parameter sets or strategy plugins."""
+    """Execute walk-forward validation across candidate strategy parameter sets or strategy plugins.
+
+    ``granularity`` is the primary evaluation bar size in seconds and defaults to
+    3600 (true 1h). When the primary bar is hourly or larger, a 15m dataset is
+    loaded as auxiliary context for the multi-timeframe features — sliced to the
+    evaluation timestamp so nothing from the future leaks in.
+    """
     if not candidates and not strategies:
         # Load default parameter candidates AND pluggable strategies
         candidates = [
@@ -105,27 +166,126 @@ def run_walk_forward_backtest(
         ]
         strategies = get_all_strategies()
 
-    # Load historical candles per symbol
+    gran = granularity if granularity in _VALID_GRANULARITY else 3600
+    # 15m context only makes sense when the primary bars are hourly or larger;
+    # on a 15m primary there is no finer archive to add.
+    aux_granularity = 900 if gran >= 3600 else None
+
     candles_by_symbol: dict[str, list[list[Any]]] = {}
+    aux_by_symbol: dict[str, list[list[Any]]] = {}
     min_ts: int = 2**63 - 1
     max_ts: int = 0
 
     for s in symbols:
-        c_list = load_historical_candles_sync(s, granularity=granularity)
+        c_list = load_historical_candles_sync(s, granularity=gran)
         if c_list and len(c_list) > 50:
             candles_by_symbol[s] = c_list
             min_ts = min(min_ts, int(c_list[0][0]))
             max_ts = max(max_ts, int(c_list[-1][0]))
+        if aux_granularity:
+            a_list = load_historical_candles_sync(s, granularity=aux_granularity)
+            if a_list and len(a_list) > 50:
+                aux_by_symbol[s] = a_list
 
     if not candles_by_symbol or min_ts == 2**63 - 1:
-        logger.warning("No historical candle data found for walk-forward validation.")
+        logger.warning(
+            "No historical %ds candle data found for walk-forward validation — "
+            "run /api/v1/research/expand-history first.",
+            gran,
+        )
         return []
 
     windows = generate_rolling_windows(min_ts, max_ts, train_days, test_days, step_days)
-    logger.info("Generated %d walk-forward windows for %d symbols", len(windows), len(candles_by_symbol))
+    logger.info(
+        "Generated %d walk-forward windows for %d symbols (primary %ds bars, %s)",
+        len(windows), len(candles_by_symbol), gran,
+        "15m context" if aux_by_symbol else "no 15m context available",
+    )
 
     btc_candles = candles_by_symbol.get("BTC-USD")
-    results: list[WalkForwardCandidateResult] = []
+    btc_aux = aux_by_symbol.get("BTC-USD")
+
+    # Index timestamp -> position once per dataset; slices are then cut at the
+    # last bar closing at or before the evaluation timestamp.
+    def _index(candles: list[list[Any]]) -> dict[int, int]:
+        return {int(c[0]): i for i, c in enumerate(candles)}
+
+    btc_index = _index(btc_candles) if btc_candles else {}
+    btc_aux_index = _index(btc_aux) if btc_aux else {}
+    per_symbol_index = {s: _index(c) for s, c in candles_by_symbol.items()}
+    per_symbol_aux_index = {s: _index(a) for s, a in aux_by_symbol.items()}
+
+    def _build_slicer(candles: list[list[Any]]):
+        opens = [int(c[0]) for c in candles]
+
+        def slice_to(ts: int) -> list[list[Any]] | None:
+            import bisect
+            # Last bar that CLOSED at or before ts: open + gran <= ts.
+            j = bisect.bisect_right(opens, ts - gran) - 1
+            if j < 0:
+                return None
+            return candles[: j + 1]
+
+        return slice_to
+
+    slice_primary = {s: _build_slicer(c) for s, c in candles_by_symbol.items()}
+    slice_aux = {s: _build_slicer(a) for s, a in aux_by_symbol.items()}
+    slice_btc = _build_slicer(btc_candles) if btc_candles else None
+    slice_btc_aux = _build_slicer(btc_aux) if btc_aux else None
+
+    def _replay_range(
+        start_ts: int,
+        end_ts: int,
+        cfg: StrategyConfig,
+        st_inst: BaseStrategy | None,
+    ) -> tuple[list[BacktestTradeResult], list[dict[str, Any]]]:
+        """Replay [start_ts, end_ts] under cfg, trades resolved on bars clipped to end_ts."""
+        trades: list[BacktestTradeResult] = []
+        rows: list[dict[str, Any]] = []
+
+        for sym, candles in candles_by_symbol.items():
+            index = per_symbol_index[sym]
+            test_indices = [
+                i for i, c in enumerate(candles)
+                if start_ts <= int(c[0]) <= end_ts and i >= 30
+            ]
+            aux_slice = slice_aux.get(sym)
+
+            for i in test_indices[::12]:
+                ts = int(candles[i][0])
+                candle_slice = candles[: i + 1]
+
+                btc_slice = slice_btc(ts) if slice_btc else None
+                candles_15m_slice = aux_slice(ts) if aux_slice else None
+
+                setup = evaluate_bar_slice(
+                    symbol=sym,
+                    candles_1h_slice=candle_slice,
+                    candles_1d_slice=None,
+                    candles_15m_slice=candles_15m_slice,
+                    candles_6h_slice=None,
+                    btc_1h_slice=btc_slice,
+                    btc_1d_slice=None,
+                    config=cfg,
+                    strategy=st_inst,
+                )
+
+                if setup and setup["label"] in ("ENTRY_ZONE", "COILED"):
+                    # Futures clipped to the window end: a train-window
+                    # calibration trade must not borrow outcomes from the test
+                    # period (or beyond the dataset).
+                    future_bars = [c for c in candles[i + 1:] if int(c[0]) <= end_ts]
+                    if future_bars:
+                        trade = simulate_trade_execution(setup, future_bars)
+                        if trade:
+                            trades.append(trade)
+                            rows.append({
+                                "score": float(setup["score"]),
+                                "status": trade.status,
+                                "realized_r": float(trade.realized_r),
+                            })
+
+        return trades, rows
 
     # Build combined evaluation list: (candidate_config, strategy_instance)
     eval_list: list[tuple[StrategyCandidateConfig, BaseStrategy | None]] = []
@@ -136,6 +296,8 @@ def run_walk_forward_backtest(
         for st in strategies:
             cfg = StrategyCandidateConfig(name=st.name)
             eval_list.append((cfg, st))
+
+    results: list[WalkForwardCandidateResult] = []
 
     for cand, st_inst in eval_list:
         base_cfg = copy.deepcopy(load_strategy())
@@ -149,41 +311,27 @@ def run_walk_forward_backtest(
         all_trades: list[BacktestTradeResult] = []
 
         for idx, (tr_s, tr_e, te_s, te_e) in enumerate(windows):
-            window_trades: list[BacktestTradeResult] = []
+            # ── TRAIN: replay the training span under the candidate's base config ──
+            _train_trades, train_rows = _replay_range(tr_s, tr_e, base_cfg, st_inst)
 
-            for sym, candles in candles_by_symbol.items():
-                # Filter test range indices
-                test_indices = [
-                    i for i, c in enumerate(candles)
-                    if te_s <= c[0] <= te_e and i >= 30
-                ]
-                btc_indices = {c[0]: i for i, c in enumerate(btc_candles)} if btc_candles else {}
+            # ── CALIBRATE: threshold-only candidates earn their test config ──
+            test_cfg = base_cfg
+            calibrated_from = None
+            if st_inst is None:
+                thr = _calibrate_min_score(train_rows, cand.min_composite_score)
+                if thr is not None:
+                    test_cfg = copy.deepcopy(base_cfg)
+                    test_cfg.labeling.min_composite_score = thr
+                    calibrated_from = thr
 
-                for i in test_indices[::12]:  # Step every 12 hours for optimized walk-forward evaluation
-                    candle_slice = candles[: i + 1]
-                    ts = candles[i][0]
+            # ── TEST: evaluate the held-out span under the calibrated config ──
+            window_trades, _ = _replay_range(te_s, te_e, test_cfg, st_inst)
 
-                    # Slice BTC candles up to same timestamp (no look-ahead)
-                    btc_slice = None
-                    if btc_candles and ts in btc_indices:
-                        b_idx = btc_indices[ts]
-                        btc_slice = btc_candles[: b_idx + 1]
-
-                    setup = evaluate_bar_slice(
-                        symbol=sym,
-                        candles_1h_slice=candle_slice,
-                        candles_15m_slice=candle_slice,
-                        btc_1h_slice=btc_slice,
-                        config=base_cfg,
-                        strategy=st_inst,
-                    )
-
-                    if setup and setup["label"] in ("ENTRY_ZONE", "COILED"):
-                        future_bars = candles[i + 1 :]
-                        if future_bars:
-                            trade = simulate_trade_execution(setup, future_bars)
-                            if trade:
-                                window_trades.append(trade)
+            if calibrated_from is not None:
+                logger.debug(
+                    "Candidate %s window %d: calibrated min score %.1f -> %.1f (%d train trades)",
+                    cand.name, idx, cand.min_composite_score, calibrated_from, len(train_rows),
+                )
 
             # Compute window metrics
             n_trades = len(window_trades)
@@ -223,7 +371,7 @@ def run_walk_forward_backtest(
         tot_wins = sum(1 for t in all_trades if t.status in ("WIN", "PARTIAL_WIN"))
         overall_wr = round(tot_wins / tot_trades * 100.0, 1) if tot_trades > 0 else 0.0
         overall_avg_r = round(sum(t.realized_r for t in all_trades) / tot_trades, 2) if tot_trades > 0 else 0.0
-        
+
         # Consistency score: proportion of windows with avg_r > 0
         pos_windows = sum(1 for w in window_perfs if w.avg_r > 0 and w.trades_count >= 2)
         total_valid_windows = max(1, sum(1 for w in window_perfs if w.trades_count >= 2))

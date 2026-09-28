@@ -178,12 +178,20 @@ async def process_signals():
             try:
                 sig_time = sig["timestamp"]
                 
-                # Fix 4: Order expiry filter
+                # Fix 4: Order expiry filter — also reaps zombie ACTIVE_T2 rows.
+                # A symbol that stops returning candles (delisting, API gap) used
+                # to leave its signal ACTIVE_T2 forever: invisible to the
+                # closed-trade stats while the Chandelier tail still "held" the
+                # remaining position. Expire it from its partial-exit time.
                 try:
                     expiry_hrs = load_strategy().ladder.order_expiry_hours
                 except Exception:
                     expiry_hrs = 6
-                
+                try:
+                    t2_expiry_hrs = load_strategy().ladder.t2_expiry_hours
+                except Exception:
+                    t2_expiry_hrs = 48
+
                 now_ts = int(datetime.now(UTC).timestamp())
                 if not sig.get("filled_at") and (now_ts - sig_time > (expiry_hrs * 3600)):
                     updates.append((
@@ -191,6 +199,22 @@ async def process_signals():
                         now_ts, None, None, None, None, "EXPIRED", sig.get("trail_sl"), sig["id"]
                     ))
                     continue
+
+                if sig.get("status") == "ACTIVE_T2":
+                    t2_start = sig.get("partial_exit_at") or sig_time
+                    if t2_start and (now_ts - int(t2_start) > (t2_expiry_hrs * 3600)):
+                        # The tail ran out of observable data without reaching T2
+                        # or its trail. T1 was already banked (partial_exit_price)
+                        # and the stop sits at entry once break-even is armed, so
+                        # PARTIAL_WIN is the honest modal label — the same one a
+                        # normal Chandelier trail exit would carry.
+                        updates.append((
+                            "PARTIAL_WIN", float(sig["mfe"] or 0.0), float(sig["mae"] or 0.0),
+                            now_ts, sig.get("filled_at"), sig.get("fill_price"),
+                            sig.get("partial_exit_at"), sig.get("partial_exit_price"),
+                            "PARTIAL_WIN", sig.get("trail_sl"), sig["id"]
+                        ))
+                        continue
 
                 # Use fill time as fetch start if already filled, else signal time
                 fetch_from = sig.get("filled_at") or sig_time

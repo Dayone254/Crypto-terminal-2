@@ -23,9 +23,15 @@ function relativeTime(isoString: string | undefined): string {
 }
 
 export const Footer: React.FC = () => {
-    const [session, setSession] = useState<string>(currentSession());
+    const [mounted, setMounted] = useState<boolean>(false);
+    const [session, setSession] = useState<string>("—");
     const [apiStatus, setApiStatus] = useState<"OK" | "ERROR" | "CHECKING">("CHECKING");
     const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
+
+    useEffect(() => {
+        setMounted(true);
+        setSession(currentSession());
+    }, []);
 
     const loadStatus = useCallback(async () => {
         setSession(currentSession());
@@ -109,7 +115,7 @@ export const Footer: React.FC = () => {
                 style={{ display: "flex", alignItems: "center", gap: "1rem", color: "var(--on-surface-variant)" }}
             >
                 <span>SCAN QUEUE: <strong style={{ color: "var(--on-surface)" }}>{symbolsLabel()}</strong></span>
-                {scanStatus?.completed_at && (
+                {mounted && scanStatus?.completed_at && (
                     <span>LAST SCAN: <strong style={{ color: "var(--on-surface)" }}>{relativeTime(scanStatus.completed_at)}</strong></span>
                 )}
                 <span

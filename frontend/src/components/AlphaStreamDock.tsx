@@ -83,12 +83,17 @@ interface AlphaStreamDockProps {
 }
 
 export const AlphaStreamDock: React.FC<AlphaStreamDockProps> = ({ isCollapsed, onToggle }) => {
+    const [mounted, setMounted] = useState<boolean>(false);
     const [activeFilter, setActiveFilter] = useState<AlertCategory>("ALL");
     const [alerts, setAlerts] = useState<DisplayAlert[]>([]);
     const [pendingCount, setPendingCount] = useState<number>(0);
     const [loading, setLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [telegramStatus, setTelegramStatus] = useState<"CONNECTED" | "OFFLINE" | "CHECKING">("CONNECTED");
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
 
     const loadAlerts = useCallback(async () => {
         try {
@@ -348,7 +353,7 @@ export const AlphaStreamDock: React.FC<AlphaStreamDockProps> = ({ isCollapsed, o
                                     </button>
 
                                     <span className="font-mono-data-compact" style={{ color: "var(--outline)" }}>
-                                        {item.time}
+                                        {mounted ? item.time : "—"}
                                     </span>
                                 </div>
                             </div>

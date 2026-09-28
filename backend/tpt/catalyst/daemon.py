@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from tpt.catalyst import analyzer, scraper
-from tpt.catalyst.watchlist_boost import invalidate_cache
+from tpt.catalyst.watchlist_boost import invalidate_cache, update_cache
 from tpt.config.settings import settings
 
 if TYPE_CHECKING:
@@ -173,6 +173,11 @@ async def run_once() -> dict[str, int]:
                     continue
                 cs = analyzer.score(raw)
                 await _upsert_signal(cs)
+                # Warm the scorer's boost cache. This was the missing half of the
+                # loop: the daemon only ever *cleared* the cache (see below),
+                # while the scorer's sync read never hit the DB — so the catalyst
+                # feed's influence on scores was identically 0.0.
+                update_cache(cs.symbol, cs.scorer_boost)
                 tier_counts[cs.priority_tier] = tier_counts.get(cs.priority_tier, 0) + 1
                 total_scraped += 1
             # Respect free-tier: pause between batches
@@ -182,8 +187,10 @@ async def run_once() -> dict[str, int]:
         except Exception as exc:
             logger.error("[catalyst_daemon] Batch error (%s): %s", batch, exc)
 
-    # Invalidate watchlist_boost cache so the scorer gets fresh data
-    invalidate_cache()
+    # Drop cache entries the scraper no longer covers, keep the ones it just
+    # refreshed. (Previously this wiped the cache unconditionally — and since
+    # nothing ever filled it, the boost was 0.0 forever.)
+    invalidate_cache(keep=set(symbols))
 
     logger.info(
         "[catalyst_daemon] Scraped %d symbols — CRITICAL:%d HIGH:%d WATCH:%d NOISE:%d",

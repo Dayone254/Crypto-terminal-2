@@ -22,7 +22,11 @@ BUSY_TIMEOUT_MS = 30_000
 CONNECT_TIMEOUT_S = 30.0
 
 _SIGNALS_COLUMNS = [
-    ("scan_run_id", "INTEGER REFERENCES scan_runs(id)"),
+    # TEXT (not INTEGER): scan_runs.id is a UUID string. The old INTEGER column
+    # stored UUID text anyway (SQLite dynamic typing) but the FK was semantically
+    # dead and the join unindexable. Existing DBs keep the old type — the stored
+    # values are identical strings either way.
+    ("scan_run_id", "TEXT REFERENCES scan_runs(id)"),
     ("filled_at", "INTEGER"),
     ("fill_price", "REAL"),
     ("trade_direction", "TEXT DEFAULT 'LONG'"),
@@ -33,6 +37,9 @@ _SIGNALS_COLUMNS = [
     ("final_status", "TEXT"),
     ("trail_sl", "REAL"),
     ("pipeline_version", "TEXT DEFAULT 'v1.0'"),
+    # The position the plan called for (constant-dollar risk sizing), captured at
+    # insert time so the ledger can answer "what size did the ladder intend?".
+    ("position_size_usd", "REAL"),
 ]
 
 # Additive migrations for the ORM-managed tables. `Base.metadata.create_all`
@@ -67,7 +74,7 @@ async def init_db():
             """
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scan_run_id INTEGER REFERENCES scan_runs(id),
+                scan_run_id TEXT REFERENCES scan_runs(id),
                 symbol TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 score REAL NOT NULL,
@@ -88,7 +95,8 @@ async def init_db():
                 partial_exit_price REAL,
                 final_status TEXT,
                 trail_sl REAL,
-                pipeline_version TEXT DEFAULT 'v1.0'
+                pipeline_version TEXT DEFAULT 'v1.0',
+                position_size_usd REAL
             )
             """
         )
@@ -99,6 +107,23 @@ async def init_db():
                 hit_rate REAL NOT NULL,
                 total_occurrences INTEGER NOT NULL,
                 last_computed_at TEXT NOT NULL
+            )
+            """
+        )
+        # Created here (not only lazily in backtest/shadow.py) so live-path SQL
+        # that excludes shadow rows via a subquery — the runner's exit
+        # calibration and the feedback loop — can never trip "no such table".
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shadow_pipelines (
+                pipeline_version TEXT PRIMARY KEY,
+                candidate_name TEXT NOT NULL,
+                staged_at TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                target_sample_size INTEGER NOT NULL DEFAULT 30,
+                status TEXT NOT NULL DEFAULT 'STAGED',
+                config_json TEXT NOT NULL,
+                promoted_at TEXT
             )
             """
         )
@@ -121,6 +146,8 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_scan_run ON signals(scan_run_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_pipeline ON signals(pipeline_version)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(timestamp)")
         await db.commit()
 
 

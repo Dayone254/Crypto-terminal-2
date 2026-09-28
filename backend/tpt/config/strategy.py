@@ -106,6 +106,10 @@ class LadderConfig(BaseModel):
     max_stop_pct: float = 6.0    # percent of entry: never so wide R dwarfs the move
     # Fix 4: Order expiry for stale pending signals
     order_expiry_hours: int = 6
+    # Cap on the post-T1 hunting leg. A symbol that stops returning candles
+    # (delisting, API gap) used to leave its signal in ACTIVE_T2 forever —
+    # invisible to every closed-trade stat while still "holding" capital.
+    t2_expiry_hours: int = 48
 
 
     # ── Exit management ──────────────────────────────────────────────────────

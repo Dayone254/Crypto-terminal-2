@@ -40,6 +40,17 @@ def _set_cache(symbol: str, boost: float) -> None:
     _cache[symbol] = (boost, expires)
 
 
+def update_cache(symbol: str, boost: float) -> None:
+    """Warm the cache with a freshly-scraped boost.
+
+    Called by the catalyst daemon after each successful scrape. Without this the
+    cache was only ever populated by `get_catalyst_boost` — which nobody calls —
+    so the scorer's sync read returned 0.0 forever while the daemon periodically
+    *cleared* the cache it never filled.
+    """
+    _set_cache(symbol, float(boost or 0.0))
+
+
 def get_catalyst_boost_sync(symbol: str) -> float:
     """Return the cached catalyst boost for a symbol WITHOUT hitting the DB.
 
@@ -88,10 +99,18 @@ async def get_catalyst_boost(symbol: str) -> float:
         return 0.0
 
 
-def invalidate_cache(symbol: str | None = None) -> None:
-    """Invalidate the boost cache.  Pass None to clear all entries."""
+def invalidate_cache(symbol: str | None = None, keep: set[str] | None = None) -> None:
+    """Invalidate the boost cache.
+
+    Pass `symbol` to drop one entry, nothing to drop all, or `keep` (a set of
+    symbols) to drop everything *except* those — used by the daemon after a
+    scrape cycle so entries the scraper no longer covers go stale instead of
+    serving a boost the data no longer supports.
+    """
     global _cache
-    if symbol is None:
+    if keep is not None:
+        _cache = {s: e for s, e in _cache.items() if s in keep}
+    elif symbol is None:
         _cache = {}
     else:
         _cache.pop(symbol, None)

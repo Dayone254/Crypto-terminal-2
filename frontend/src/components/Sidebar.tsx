@@ -34,10 +34,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
     const pathname = usePathname();
     const { isOpen: isSidebarOpen, toggleSidebar } = useSidebar();
+    const [mounted, setMounted] = useState<boolean>(false);
     const [sysClock, setSysClock] = useState<string>("");
     const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
 
     useEffect(() => {
+        setMounted(true);
         const timer = setInterval(() => {
             const now = new Date();
             setSysClock(now.toISOString().substring(11, 23));
@@ -72,7 +74,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const scannerIsLive = scanStatus?.status === "DONE" || scanStatus?.status === "IDLE";
     const scannerStatusLabel = scanStatus ? scanStatus.status : "LOADING";
     const symbolsScanned = scanStatus?.symbols_fetched ?? 0;
-    const lastRunLabel = scanStatus?.completed_at ? relativeTime(scanStatus.completed_at) : "—";
+    const lastRunLabel = (mounted && scanStatus?.completed_at) ? relativeTime(scanStatus.completed_at) : "—";
 
     return (
         <aside
