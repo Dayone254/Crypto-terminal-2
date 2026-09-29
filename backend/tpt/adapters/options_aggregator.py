@@ -14,6 +14,9 @@ logger = logging.getLogger("tpt.adapters.options_aggregator")
 # Key: underlying (e.g. "BTC", "ETH") -> {"combined_board": [...], "venue_metrics": {...}, "timestamp": float}
 _OPTIONS_CACHE: dict[str, dict[str, Any]] = {}
 _CACHE_TTL_SECONDS = 30.0
+# A cached board older than this is dropped rather than served: better an
+# honest refetch than silently pricing gamma off yesterday's chain.
+_MAX_STALE_SECONDS = 300.0
 _FETCH_LOCKS: dict[str, asyncio.Lock] = {}
 
 async def _fetch_and_cache(underlying: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -34,8 +37,11 @@ async def _fetch_and_cache(underlying: str) -> tuple[list[dict[str, Any]], dict[
         async def _safe_fetch(coro, venue_name: str):
             t0 = time.time()
             try:
-                # 1.5s max timeout per venue for sub-second API responsiveness
-                res = await asyncio.wait_for(coro, timeout=1.5)
+                # 4s max per venue. The original 1.5s budget was tuned for a
+                # same-datacenter deployment; cross-region REST latency to
+                # Deribit/OKX/Bybit regularly exceeds it, silently dropping
+                # venues and shrinking the board the GEX engine computes from.
+                res = await asyncio.wait_for(coro, timeout=4.0)
 
                 elapsed = time.time() - t0
                 logger.info(f"Successfully fetched {len(res)} option contracts from {venue_name} in {elapsed:.2f}s")
@@ -137,12 +143,16 @@ async def aggregate_multi_venue_options_board(underlying: str = "BTC") -> tuple[
 
     if cached:
         age = now - cached["timestamp"]
-        if age > _CACHE_TTL_SECONDS:
-            # Trigger background refresh if stale without blocking the request,
-            # deduplicating tasks to prevent unbounded task spawning.
-            task = _BACKGROUND_TASKS.get(base)
-            if task is None or task.done():
-                _BACKGROUND_TASKS[base] = asyncio.create_task(_fetch_and_cache(base))
+        # Serve stale only while a refresh is actually in flight; a board that
+        # can no longer be refreshed (venues down) must age out so callers see
+        # an honest empty board instead of frozen data forever.
+        task = _BACKGROUND_TASKS.get(base)
+        if age > _CACHE_TTL_SECONDS and (task is None or task.done()):
+            if age > _MAX_STALE_SECONDS:
+                # Too old to trust — drop it and refetch synchronously.
+                del _OPTIONS_CACHE[base]
+                return await _fetch_and_cache(base)
+            _BACKGROUND_TASKS[base] = asyncio.create_task(_fetch_and_cache(base))
         return cached["combined_board"], cached["venue_metrics"]
 
     # First cold fetch: wait for initial population

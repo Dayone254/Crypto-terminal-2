@@ -129,20 +129,36 @@ class BackgroundMemoryStore:
     async def _sync_options_flow(self):
         """Background loop caching Deribit/Multi-Venue Options Flow every 15 seconds.
         Runs immediately on startup so fresh data is always available."""
+        from tpt.adapters.options_aggregator import aggregate_multi_venue_options_board
+        from tpt.engine.oi_history import maybe_record_snapshot
         from tpt.engine.options_flow import calculate_macro_gamma_exposure
         # Yield briefly so FastAPI lifespan finishes startup cleanly
         await asyncio.sleep(2.0)
         while True:
             try:
-                for underlying in ("BTC", "ETH"):
+                # BTC/ETH keep the synthetic-board fallback (desk regime panel
+                # through Deribit outages). SOL/AVAX have real Deribit listings
+                # and are refreshed strictly from venue data.
+                for underlying in ("BTC", "ETH", "SOL", "AVAX"):
                     try:
-                        flow = await asyncio.wait_for(calculate_macro_gamma_exposure(underlying, 0.0), timeout=15.0)
-                        if flow:
+                        allow_synth = underlying in ("BTC", "ETH")
+                        flow = await asyncio.wait_for(
+                            calculate_macro_gamma_exposure(underlying, 0.0, allow_synthetic=allow_synth),
+                            timeout=20.0,
+                        )
+                        if flow and flow.get("options_available"):
                             self.macro_options_cache[underlying] = flow
+                            # Hourly OI snapshot (aggregator RAM cache makes the
+                            # board re-read ~free) powers 24h flow deltas.
+                            try:
+                                board, _vm = await aggregate_multi_venue_options_board(underlying)
+                                await maybe_record_snapshot(underlying, board)
+                            except Exception as snap_e:
+                                logger.debug("OI snapshot skipped for %s: %s", underlying, snap_e)
                     except Exception as sym_e:
                         logger.warning(f"Options sync error for {underlying}: {sym_e}")
                     await asyncio.sleep(0.1)  # Yield to event loop between underlying assets
-                logger.info("Successfully updated global Macro Options memory cache for BTC, ETH.")
+                logger.info("Successfully updated Macro Options memory cache (BTC, ETH, SOL, AVAX).")
             except asyncio.CancelledError:
                 break
             except Exception as e:

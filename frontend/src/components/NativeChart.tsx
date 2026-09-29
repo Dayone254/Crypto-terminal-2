@@ -450,6 +450,10 @@ export const NativeChart: React.FC<NativeChartProps> = ({
             apiFetch(`/api/v1/options/flow/${productId}`)
                 .then(res => res.ok ? res.json() : null)
                 .then(data => {
+                    // Keep the payload even when options are unavailable: the
+                    // render guard keys off options_available === false, and
+                    // clobbering state with null would let a stale previous
+                    // symbol's data linger on the new chart.
                     if (isMounted && data) {
                         setGexData(data);
                     }
@@ -774,7 +778,9 @@ export const NativeChart: React.FC<NativeChartProps> = ({
         const lastTs = lastCandle.timestamp;
 
         const isShort = (activeSL && activeTrancheA && activeSL > activeTrancheA) || tradeDirection === "SHORT";
-        const mainTP = (activeTP2 && activeTP2 > 0) ? activeTP2 : (activeTP1 || tpLevel);
+        // Plan box tops out at the published TP (T1) — the same number the
+        // ledger and detail header quote. T2 stays visible via its tag line.
+        const mainTP = (activeTP1 && activeTP1 > 0) ? activeTP1 : tpLevel;
 
         // ── Trade lifecycle windows (real signals ledger) ──
         // Each box: starts at fill (or signal creation), ends at full close; a
@@ -899,7 +905,7 @@ export const NativeChart: React.FC<NativeChartProps> = ({
         if (showHistory && tradeHistory && tradeHistory.length > 0) {
             tradeHistory.forEach((hist) => {
                 const histTs = new Date(hist.computed_at).getTime();
-                const histTarget = (hist.target_2_price && hist.target_2_price > 0) ? hist.target_2_price : hist.target_1_price;
+                const histTarget = (hist.target_1_price && hist.target_1_price > 0) ? hist.target_1_price : hist.target_2_price;
 
                 if (!isNaN(histTs) && hist.tranche_a_price && histTarget && hist.stop_price) {
                     const histEndTs = histTs + (4 * granularity * 1000);
@@ -938,7 +944,14 @@ export const NativeChart: React.FC<NativeChartProps> = ({
 
             const entry = w.entry_price > 0 ? w.entry_price : activeTrancheA;
             const stop = w.is_live && w.current_sl ? w.current_sl : w.sl_price;
-            const takeProfit = (w.tp2_price && w.tp2_price > 0) ? w.tp2_price : w.tp1_price;
+            // Phase-aware target: while the trade is still hunting TP1 the
+            // profit zone ends at TP1 — the same number the ledger, detail
+            // header and T1 tag display. Only after the partial exit (TP1
+            // hit, runner phase) does the box extend to TP2. Using TP2 from
+            // the start made the box tower past the visible axis and disagree
+            // with every text surface.
+            const tp2 = (w.tp2_price && w.tp2_price > 0) ? w.tp2_price : w.tp1_price;
+            const takeProfit = w.tp1_hit_at_ms ? tp2 : ((w.tp1_price && w.tp1_price > 0) ? w.tp1_price : tp2);
             if (!entry || !stop || !takeProfit) return;
 
             let profitColor: string = "rgba(16, 185, 129, 0.25)";
@@ -1034,7 +1047,9 @@ export const NativeChart: React.FC<NativeChartProps> = ({
         }
 
         // Render GEX Liquidity Zones Overlays (Intensity-Based Bands)
-        if (showGexZones && gexData) {
+        // options_available === false → the backend has no real options market
+        // for this symbol; never render its (absent) levels.
+        if (showGexZones && gexData && gexData.options_available !== false) {
             const callWall = gexData.call_wall;
             const putWall = gexData.put_wall;
             const flip = gexData.gamma_flip;

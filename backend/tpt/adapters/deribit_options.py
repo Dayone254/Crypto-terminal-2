@@ -38,7 +38,10 @@ async def aggregate_options_board(underlying: str = "BTC") -> list[dict[str, Any
             
             oi_coin = float(item.get("open_interest", 0) or 0)
             px = float(item.get("underlying_price", 0) or 0)
-            oi_usd = oi_coin * px if px > 0 else oi_coin * 90000.0
+            # Never invent a price (the old 90000.0 fallback would mis-scale any
+            # non-BTC board). GEX math uses live payload spot anyway; a missing
+            # underlying_price just contributes 0 USD notional here.
+            oi_usd = oi_coin * px if px > 0 else 0.0
 
             board.append({
                 "symbol": sym,

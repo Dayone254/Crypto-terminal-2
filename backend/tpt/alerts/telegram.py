@@ -6,6 +6,35 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def send_raw_alert(markdown_text: str) -> bool:
+    """Send a pre-formatted MarkdownV2 message. Returns True when delivered.
+
+    Used by non-setup alerters (gamma regime flips etc.) that build their own
+    message body. No-ops (returns False) when Telegram is not configured and
+    swallows transport errors — alerting must never break the caller's loop.
+    """
+    from tpt.config.settings import settings
+
+    token = settings.telegram_bot_token
+    chat_id = settings.telegram_chat_id
+    if not token or not chat_id:
+        logger.debug("Telegram not configured — skipping raw alert")
+        return False
+    try:
+        from telegram import Bot
+
+        bot = Bot(token=token)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=markdown_text,
+            parse_mode="MarkdownV2",
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Telegram raw alert failed: %s", exc)
+        return False
+
+
 async def send_setup_alert(
     symbol: str,
     score: float,

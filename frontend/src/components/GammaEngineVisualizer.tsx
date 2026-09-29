@@ -39,9 +39,30 @@ export interface GammaEngineData {
     flip_distance_pct: number;
     call_wall: number;
     put_wall: number;
-    regime: "LONG_GAMMA_STABLE" | "SHORT_GAMMA_VOLATILE";
+    regime: "LONG_GAMMA_STABLE" | "SHORT_GAMMA_VOLATILE" | "UNAVAILABLE";
+    options_available?: boolean;
+    computed_at?: number;
+    message?: string;
     gex_curve: GexStrikeItem[];
     venue_metrics?: VenueMetrics;
+    max_pain?: number | null;
+    skew?: { rr25_pct: number; fly25_pct: number; ref_expiry: string } | null;
+    expiry_clusters?: Array<{
+        expiry: string; dte: number; total_oi_usd: number;
+        call_oi_usd: number; put_oi_usd: number; share_pct: number;
+    }>;
+    hedging_profile?: {
+        bias: string; downside_support_gex_m: number; upside_resistance_gex_m: number;
+        top_supportive: Array<{ strike: number; gex_m: number }>;
+        top_suppressive: Array<{ strike: number; gex_m: number }>;
+    } | null;
+    pin_map?: Array<{ strike: number; gex_m: number; dist_pct: number; strength: number }>;
+    oi_flow?: {
+        hours: number; delta_total_usd: number; delta_call_usd: number; delta_put_usd: number;
+        top_strikes: Array<{ strike: number; delta_oi_usd: number; side: string }>;
+    } | null;
+    confidence?: { score: number; grade: string; reasons: string[] } | null;
+    regime_transitions?: Array<{ ts: number; from: string; to: string; spot: number }>;
     orderflow?: {
         confluence_score?: number;
         dominant_side?: string;
@@ -52,7 +73,6 @@ export interface GammaEngineData {
     };
     // Set to false by the backend when no same-day contracts exist (e.g. BTC on non-Friday)
     expiry_available?: boolean;
-    message?: string;
 }
 
 export interface GammaEngineProps {
@@ -194,11 +214,16 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
     }, [targetSymbol, baseCoin, expiryFilter]);
 
     // ─── DYNAMIC METRIC DERIVATIONS ───────────────────────────────────────
-    const spot = liveSpotPrice || data?.spot_price || (baseCoin === "BTC" ? 85875.50 : baseCoin === "ETH" ? 2642.48 : baseCoin === "SOL" ? 142.50 : 24.80);
-    const callWall = data?.call_wall || Math.round(spot * 1.15);
-    const putWall = data?.put_wall || Math.round(spot * 0.85);
-    const gammaFlip = data?.gamma_flip || Math.round(spot * 0.95);
-    const totalGex = data?.total_net_gex_millions ?? (baseCoin === "BTC" ? 12.5 : baseCoin === "ETH" ? 4.2 : baseCoin === "SOL" ? 1.8 : 0.6);
+    // Everything below renders from REAL engine output only. The fabricated
+    // per-coin fallbacks that used to live here (spot 85875.50, walls at
+    // spot±15%, dealer delta -514.64M, a canned GEX curve) made the page look
+    // alive while showing fiction whenever the backend had no data.
+    const hasData = !!data && data.options_available !== false && !!data.spot_price;
+    const spot = liveSpotPrice || (data?.spot_price ?? 0);
+    const callWall = data?.call_wall ?? 0;
+    const putWall = data?.put_wall ?? 0;
+    const gammaFlip = data?.gamma_flip ?? 0;
+    const totalGex = data?.total_net_gex_millions ?? 0;
     const isLongGamma = totalGex >= 0;
 
     // Dynamic distance calculations relative to live spot
@@ -210,34 +235,50 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
     const putWallDistPct = (putWallDistVal >= 0 ? "+" : "") + putWallDistVal.toFixed(1);
     const flipDistPct = (flipDistVal >= 0 ? "+" : "") + flipDistVal.toFixed(1);
 
-    const dealerDelta = data?.net_dealer_delta_millions ?? (baseCoin === "BTC" ? -514.64 : baseCoin === "ETH" ? -120.5 : baseCoin === "SOL" ? -35.2 : -8.4);
-    const dealerTheta = data?.net_dealer_theta ?? (baseCoin === "BTC" ? 2.07 : baseCoin === "ETH" ? 0.85 : baseCoin === "SOL" ? 0.24 : 0.08);
-    const dealerVega = data?.net_dealer_vega ?? (baseCoin === "BTC" ? -2.78 : baseCoin === "ETH" ? -0.92 : baseCoin === "SOL" ? -0.31 : -0.12);
-    const ivSkewVal = data?.iv_skew ?? 4.66;
-    const ivSkewPct = (typeof ivSkewVal === "number" ? (ivSkewVal > 1 ? ivSkewVal : ivSkewVal * 100) : 4.66).toFixed(2);
+    const dealerDelta = data?.net_dealer_delta_millions ?? 0;
+    const dealerTheta = data?.net_dealer_theta ?? 0;
+    const dealerVega = data?.net_dealer_vega ?? 0;
+    // Backend sends iv_skew already scaled to percent (round(skew*100, 2)).
+    const ivSkewVal = typeof data?.iv_skew === "number" ? data.iv_skew : 0;
+    const ivSkewPct = (ivSkewVal >= 0 ? "+" : "") + ivSkewVal.toFixed(2);
 
-    // Orderflow confidence: use real backend confluence_score if available, else derive a rough estimate
-    const backendScore = data?.orderflow?.confluence_score;
-    const confidenceScore = backendScore != null
-        ? Math.min(100, Math.max(5, Math.round(backendScore)))
-        : Math.min(100, Math.max(5, Math.round(50 + (dealerDelta / 20) + (totalGex / 2))));
+    // Orderflow confidence: real backend confluence score, or neutral when the
+    // orderflow accumulator has not produced one — never a synthesized number.
+    const backendScore = hasData ? data?.orderflow?.confluence_score : undefined;
+    const confidenceScore = backendScore != null ? Math.min(100, Math.max(0, Math.round(backendScore))) : 50;
 
-    // Dynamic Strike Curve Data scaled to current asset spot price
-    const step = spot > 10000 ? 2000 : (spot > 1000 ? 100 : (spot > 50 ? 5 : 1));
-    const roundedSpot = Math.round(spot / step) * step;
+    // GEX curve: real engine strikes only. The canned curve that used to be
+    // drawn here (fixed net_gex values, invented OI) looked identical whether
+    // or not the backend had returned a single real contract.
+    const gexCurve = data?.gex_curve ?? [];
 
-    const gexCurve = data?.gex_curve && data.gex_curve.length > 0 ? data.gex_curve : [
-        { strike: roundedSpot + (step * 4), net_gex: 15, call_gex: 20, put_gex: -5, call_oi: 50, put_oi: 10 },
-        { strike: roundedSpot + (step * 3), net_gex: 25, call_gex: 30, put_gex: -5, call_oi: 60, put_oi: 15 },
-        { strike: roundedSpot + (step * 2), net_gex: 51, call_gex: 60, put_gex: -9, call_oi: 120, put_oi: 20 },
-        { strike: roundedSpot + step, net_gex: -5, call_gex: 20, put_gex: -25, call_oi: 75, put_oi: 85 },
-        { strike: roundedSpot, net_gex: -22, call_gex: 15, put_gex: -37, call_oi: 40, put_oi: 110 },
-        { strike: roundedSpot - step, net_gex: -35, call_gex: 10, put_gex: -45, call_oi: 30, put_oi: 130 },
-        { strike: roundedSpot - (step * 2), net_gex: -40, call_gex: 5, put_gex: -45, call_oi: 20, put_oi: 140 },
-        { strike: roundedSpot - (step * 3), net_gex: -42, call_gex: 2, put_gex: -44, call_oi: 10, put_oi: 150 },
-    ];
+    // Freshness: gamma levels only refresh with the options board (~15-30s
+    // venue cache) while the spot ticker ticks every 2s — label data age
+    // honestly instead of always claiming LIVE REAL-TIME.
+    const dataAgeSec = hasData && data?.computed_at
+        ? Math.max(0, Math.floor(Date.now() / 1000 - data.computed_at))
+        : null;
+    const dataStatus: "OFFLINE" | "STALE" | "LIVE" =
+        !hasData ? "OFFLINE" : dataAgeSec === null || dataAgeSec > 120 ? "STALE" : "LIVE";
 
     const sortedStrikes = [...gexCurve].sort((a, b) => b.strike - a.strike);
+
+    // ─── INSTITUTIONAL ANALYTICS (all backend-computed, real data only) ────
+    const maxPain = hasData ? data?.max_pain ?? null : null;
+    const pinMap = hasData ? data?.pin_map ?? [] : [];
+    const allClusters = hasData ? data?.expiry_clusters ?? [] : [];
+    const clusters = allClusters.filter((c) => c.expiry !== "_0DTE_SHARE").slice(0, 3);
+    const zeroDteShare = allClusters.find((c) => c.expiry === "_0DTE_SHARE")?.share_pct ?? null;
+    const hedging = hasData ? data?.hedging_profile ?? null : null;
+    const oiFlow = hasData ? data?.oi_flow ?? null : null;
+    const skewMetrics = hasData ? data?.skew ?? null : null;
+    const transitions = hasData ? (data?.regime_transitions ?? []).slice(-4).reverse() : [];
+    const confidence = hasData ? data?.confidence ?? null : null;
+    const fmtNotional = (v: number) =>
+        Math.abs(v) >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` : `$${(v / 1e6).toFixed(0)}M`;
+    const fmtSignedM = (v: number) => `${v >= 0 ? "+" : "−"}$${Math.abs(v).toFixed(1)}M`;
+    const flipTime = (ts: number) =>
+        new Date(ts * 1000).toLocaleTimeString("en-GB", { timeZone: "Africa/Nairobi", hour: "2-digit", minute: "2-digit" });
 
     return (
         <div style={{
@@ -335,15 +376,18 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
 
                     <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem" }}>
                         <span style={{ fontSize: "1.2rem", fontWeight: 900, color: "#ffffff", letterSpacing: "-0.02em" }}>
-                            ${spot.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            {spot > 0 ? `$${spot.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
                         </span>
+                        {spot > 0 && (
                         <span style={{ fontSize: "0.7rem", fontWeight: 800, color: "#64748b" }}>
                             {isLongGamma ? "LONG Γ" : "SHORT Γ"}
                         </span>
+                        )}
                     </div>
                 </div>
 
                 <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                    {hasData && (
                     <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.65rem" }}>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.1rem" }}>
                             <span style={{ color: "#64748b", fontWeight: 700 }}>VOLATILITY</span>
@@ -365,6 +409,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             </div>
                         </div>
                     </div>
+                    )}
 
                     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                         <div style={{
@@ -373,15 +418,30 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             gap: "0.3rem",
                             padding: "0.25rem 0.5rem",
                             borderRadius: "4px",
-                            background: "rgba(16, 185, 129, 0.12)",
-                            border: "1px solid rgba(16, 185, 129, 0.25)",
-                            color: "#10b981",
+                            background: dataStatus === "LIVE" ? "rgba(16, 185, 129, 0.12)" : dataStatus === "STALE" ? "rgba(245, 158, 11, 0.12)" : "rgba(100, 116, 139, 0.12)",
+                            border: `1px solid ${dataStatus === "LIVE" ? "rgba(16, 185, 129, 0.25)" : dataStatus === "STALE" ? "rgba(245, 158, 11, 0.3)" : "rgba(100, 116, 139, 0.3)"}`,
+                            color: dataStatus === "LIVE" ? "#10b981" : dataStatus === "STALE" ? "#f59e0b" : "#94a3b8",
                             fontSize: "0.65rem",
                             fontWeight: 800
                         }}>
-                            <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#10b981" }} />
-                            LIVE REAL-TIME
+                            <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: dataStatus === "LIVE" ? "#10b981" : dataStatus === "STALE" ? "#f59e0b" : "#94a3b8" }} />
+                            {dataStatus === "LIVE" ? "LIVE REAL-TIME" : dataStatus === "STALE" ? `STALE ${dataAgeSec ?? ""}s` : "NO DATA"}
                         </div>
+
+                        {confidence && (
+                            <div
+                                title={confidence.reasons.join(" · ")}
+                                style={{
+                                    display: "flex", alignItems: "center", gap: "0.3rem",
+                                    padding: "0.25rem 0.5rem", borderRadius: "4px", fontSize: "0.65rem", fontWeight: 800,
+                                    background: confidence.score >= 80 ? "rgba(16, 185, 129, 0.12)" : confidence.score >= 50 ? "rgba(245, 158, 11, 0.12)" : "rgba(244, 63, 94, 0.12)",
+                                    border: `1px solid ${confidence.score >= 80 ? "rgba(16, 185, 129, 0.25)" : confidence.score >= 50 ? "rgba(245, 158, 11, 0.3)" : "rgba(244, 63, 94, 0.3)"}`,
+                                    color: confidence.score >= 80 ? "#10b981" : confidence.score >= 50 ? "#f59e0b" : "#f43f5e",
+                                }}
+                            >
+                                DATA GRADE {confidence.grade} · {confidence.score}/100
+                            </div>
+                        )}
 
                         <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.68rem", color: "#94a3b8" }}>
                             <Clock size={12} color="#64748b" />
@@ -407,6 +467,27 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                 }}>
                     <span style={{ fontSize: "0.85rem" }}>⚠</span>
                     <span><strong>No 0DTE contracts today.</strong> {baseCoin} options expire weekly (Fridays at 08:00 UTC). {no0dte}</span>
+                </div>
+            )}
+
+            {/* ─── NO OPTIONS MARKET BANNER (honest empty state) ────────────── */}
+            {data && data.options_available === false && (
+                <div style={{
+                    padding: "0.55rem 0.85rem",
+                    background: "rgba(100, 116, 139, 0.08)",
+                    border: "1px solid rgba(100, 116, 139, 0.3)",
+                    borderRadius: "6px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    fontSize: "0.68rem",
+                    color: "#94a3b8",
+                }}>
+                    <span style={{ fontSize: "0.85rem" }}>ℹ</span>
+                    <span>
+                        <strong>No options market data for {baseCoin}.</strong>{" "}
+                        {data.message || "GEX levels, walls and dealer positioning need a listed options chain (currently BTC, ETH, SOL, AVAX). Values are withheld rather than estimated."}
+                    </span>
                 </div>
             )}
 
@@ -444,6 +525,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                     </span>
                 </div>
 
+                {hasData && (
                 <div style={{
                     padding: "0.65rem 0.85rem",
                     background: "rgba(11, 16, 26, 0.7)",
@@ -490,14 +572,15 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             padding: "0.25rem 0.55rem",
                             borderRadius: "16px"
                         }}>
-                            PUT SKEW +{ivSkewPct}%
+                            PUT SKEW {ivSkewPct}%
                         </span>
                     </div>
                 </div>
+                )}
             </div>
 
             {/* 4 Dynamic Intelligence Cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.5rem" }}>
+            <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.5rem" }}>
                 <div style={{ padding: "0.6rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(16, 185, 129, 0.15)", borderRadius: "6px" }}>
                     <span style={{ fontSize: "0.6rem", color: "#10b981", fontWeight: 800 }}>
                         + {isLongGamma ? "LONG GAMMA" : "SHORT GAMMA"} (${totalGex.toFixed(1)}M GEX)
@@ -535,8 +618,145 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                 </div>
             </div>
 
+            {/* ─── ROW 1.5: DEALER HEDGING PRESSURE · SKEW · 24H FLOW ─────── */}
+            <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.5rem" }}>
+                <div style={{ padding: "0.65rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "6px" }}>
+                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>DEALER HEDGING PRESSURE (±5% band)</span>
+                    {hedging ? (
+                        <>
+                            <div style={{ fontSize: "0.95rem", fontWeight: 900, marginTop: "0.25rem", color: hedging.bias === "SUPPORTIVE" ? "#10b981" : hedging.bias === "SUPPRESSIVE" ? "#f43f5e" : "#94a3b8" }}>
+                                {hedging.bias}
+                            </div>
+                            <div style={{ display: "flex", gap: "0.8rem", fontSize: "0.6rem", color: "#cbd5e1", marginTop: "0.2rem" }}>
+                                <span>Support <strong style={{ color: "#10b981" }}>{fmtSignedM(hedging.downside_support_gex_m)}</strong></span>
+                                <span>Resist <strong style={{ color: "#f43f5e" }}>{fmtSignedM(hedging.upside_resistance_gex_m)}</strong></span>
+                            </div>
+                            <div style={{ fontSize: "0.58rem", color: "#64748b", marginTop: "0.25rem" }}>
+                                {hedging.top_supportive.length > 0 && `Dip-buy wall: $${hedging.top_supportive[0].strike.toLocaleString()} (${fmtSignedM(hedging.top_supportive[0].gex_m)})`}
+                                {hedging.top_suppressive.length > 0 && ` · Rally-sell wall: $${hedging.top_suppressive[0].strike.toLocaleString()} (${fmtSignedM(hedging.top_suppressive[0].gex_m)})`}
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{ fontSize: "0.62rem", color: "#64748b", marginTop: "0.25rem" }}>No hedging data in current board.</div>
+                    )}
+                </div>
+
+                <div style={{ padding: "0.65rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "6px" }}>
+                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>VOL SKEW (25Δ)</span>
+                    {skewMetrics ? (
+                        <>
+                            <div style={{ fontSize: "0.95rem", fontWeight: 900, marginTop: "0.25rem", color: skewMetrics.rr25_pct < 0 ? "#f43f5e" : "#10b981" }}>
+                                RR25 {skewMetrics.rr25_pct >= 0 ? "+" : ""}{skewMetrics.rr25_pct.toFixed(2)}%
+                            </div>
+                            <div style={{ fontSize: "0.6rem", color: "#cbd5e1", marginTop: "0.2rem" }}>
+                                Fly25 {skewMetrics.fly25_pct >= 0 ? "+" : ""}{skewMetrics.fly25_pct.toFixed(2)}% · {skewMetrics.ref_expiry}
+                            </div>
+                            <div style={{ fontSize: "0.58rem", color: "#64748b", marginTop: "0.25rem" }}>
+                                {skewMetrics.rr25_pct < 0 ? "Puts bid — crash-hedge demand elevated." : "Calls bid — upside chase demand."}
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{ fontSize: "0.62rem", color: "#64748b", marginTop: "0.25rem" }}>Skew needs a two-sided chain — not measurable on this board.</div>
+                    )}
+                </div>
+
+                <div style={{ padding: "0.65rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "6px" }}>
+                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>24H POSITIONING FLOW</span>
+                    {oiFlow ? (
+                        <>
+                            <div style={{ fontSize: "0.95rem", fontWeight: 900, marginTop: "0.25rem", color: oiFlow.delta_total_usd >= 0 ? "#10b981" : "#f43f5e" }}>
+                                {fmtSignedM(oiFlow.delta_total_usd / 1e6).replace("M", oiFlow.delta_total_usd >= 1e9 || oiFlow.delta_total_usd <= -1e9 ? "B-scale" : "M")}
+                                <span style={{ fontSize: "0.58rem", color: "#64748b", fontWeight: 700 }}> vs {oiFlow.hours}h ago</span>
+                            </div>
+                            <div style={{ display: "flex", gap: "0.8rem", fontSize: "0.6rem", color: "#cbd5e1", marginTop: "0.2rem" }}>
+                                <span>Calls <strong style={{ color: oiFlow.delta_call_usd >= 0 ? "#10b981" : "#f43f5e" }}>{oiFlow.delta_call_usd >= 0 ? "+" : "−"}{fmtNotional(Math.abs(oiFlow.delta_call_usd))}</strong></span>
+                                <span>Puts <strong style={{ color: oiFlow.delta_put_usd >= 0 ? "#10b981" : "#f43f5e" }}>{oiFlow.delta_put_usd >= 0 ? "+" : "−"}{fmtNotional(Math.abs(oiFlow.delta_put_usd))}</strong></span>
+                            </div>
+                            <div style={{ fontSize: "0.58rem", color: "#64748b", marginTop: "0.25rem" }}>
+                                {oiFlow.top_strikes.map((s) => `$${s.strike.toLocaleString()} ${s.side}`).join(" · ") || "No notable strike moves."}
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{ fontSize: "0.62rem", color: "#64748b", marginTop: "0.25rem" }}>Collecting baseline — flow deltas appear after ~24h of snapshots.</div>
+                    )}
+                </div>
+            </div>
+
+            {/* ─── ROW 1.6: EXPIRY CLUSTERS · MAX PAIN · PIN MAP · REGIME MEMORY ── */}
+            <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "1.2fr 1fr", gap: "0.5rem" }}>
+                <div style={{ padding: "0.65rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "6px" }}>
+                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>EXPIRY CLUSTERING (notional OI)</span>
+                    {clusters.length > 0 ? (
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.62rem", marginTop: "0.3rem" }}>
+                            <thead>
+                                <tr style={{ color: "#64748b", textAlign: "left", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                                    <th style={{ paddingBottom: "0.25rem" }}>EXPIRY</th>
+                                    <th>DTE</th>
+                                    <th>NOTIONAL</th>
+                                    <th>SHARE</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {clusters.map((c) => (
+                                    <tr key={c.expiry} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                                        <td style={{ padding: "0.25rem 0", fontWeight: 800, color: "#f8fafc" }}>{c.expiry}</td>
+                                        <td style={{ color: "#cbd5e1" }}>{c.dte.toFixed(0)}</td>
+                                        <td style={{ color: "#38bdf8", fontWeight: 700 }}>{fmtNotional(c.total_oi_usd)}</td>
+                                        <td style={{ color: "#94a3b8" }}>{c.share_pct.toFixed(1)}%</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    ) : (
+                        <div style={{ fontSize: "0.62rem", color: "#64748b", marginTop: "0.25rem" }}>No expiry notional in current board.</div>
+                    )}
+                    {zeroDteShare !== null && (
+                        <div style={{ fontSize: "0.58rem", color: zeroDteShare > 50 ? "#f59e0b" : "#64748b", marginTop: "0.3rem", fontWeight: 700 }}>
+                            0DTE share: {zeroDteShare.toFixed(1)}%{zeroDteShare > 50 ? " — expiry-day regime, pin risk dominates" : ""}
+                        </div>
+                    )}
+                </div>
+
+                <div style={{ padding: "0.65rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "6px", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>MAX PAIN & PIN MAP</span>
+                    {maxPain ? (
+                        <div style={{ fontSize: "0.72rem", fontWeight: 900, color: "#f59e0b" }}>
+                            Max Pain ${maxPain.toLocaleString()}
+                            <span style={{ fontSize: "0.58rem", color: "#64748b", fontWeight: 700 }}>
+                                {spot > 0 ? ` · ${(Math.abs(maxPain - spot) / spot * 100).toFixed(2)}% from spot` : ""}
+                            </span>
+                        </div>
+                    ) : (
+                        <div style={{ fontSize: "0.62rem", color: "#64748b" }}>Max pain needs OI — none in board.</div>
+                    )}
+                    {pinMap.length > 0 && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                            {pinMap.map((p) => (
+                                <div key={p.strike} style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.6rem" }}>
+                                    <span style={{ width: "64px", color: "#f8fafc", fontWeight: 800 }}>${p.strike.toLocaleString()}</span>
+                                    <div style={{ flex: 1, height: "5px", background: "rgba(255,255,255,0.06)", borderRadius: "3px", overflow: "hidden" }}>
+                                        <div style={{ width: `${p.strength}%`, height: "100%", background: "#eab308", borderRadius: "3px" }} />
+                                    </div>
+                                    <span style={{ color: "#64748b" }}>{p.dist_pct.toFixed(1)}% · {p.strength.toFixed(0)}%</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {transitions.length > 0 && (
+                        <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "0.3rem", fontSize: "0.58rem", color: "#64748b" }}>
+                            <span style={{ fontWeight: 800, color: "#94a3b8" }}>REGIME MEMORY · </span>
+                            {transitions.map((t, i) => (
+                                <span key={t.ts} style={{ color: t.to.includes("LONG") ? "#10b981" : "#f43f5e" }}>
+                                    {i > 0 ? " · " : ""}{flipTime(t.ts)} {t.from.includes("LONG") ? "L→S" : "S→L"}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+
             {/* ─── ROW 2: DYNAMIC KEY OPTIONS LEVELS & BIDIRECTIONAL GEX CHART ─── */}
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: "0.5rem" }}>
+            <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "1.2fr 1fr", gap: "0.5rem" }}>
                 {/* Left Table + Vertical Price Ladder */}
                 <div style={{
                     padding: "0.75rem 0.85rem",
@@ -746,7 +966,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
             </div>
 
             {/* ─── ROW 3: DYNAMIC MARKET DATA & DEALER POSITIONING ─────────── */}
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: "0.5rem" }}>
+            <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "1.2fr 1fr", gap: "0.5rem" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                     <span style={{ fontSize: "0.75rem", fontWeight: 900, color: "#f8fafc", letterSpacing: "0.04em" }}>MARKET DATA</span>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem" }}>
@@ -898,14 +1118,14 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                 </div>
             </div>
 
-            {/* ─── ROW 4: GAMMA DISTRIBUTION HEATMAP BAR ────────────────────── */}
+            {/* ─── ROW 4: GAMMA DISTRIBUTION HEATMAP BAR (real per-strike data) ── */}
             <div style={{
+                display: hasData ? "flex" : "none",
+                flexDirection: "column",
                 padding: "0.75rem 0.85rem",
                 background: "rgba(11, 16, 26, 0.7)",
                 border: "1px solid rgba(255, 255, 255, 0.05)",
                 borderRadius: "6px",
-                display: "flex",
-                flexDirection: "column",
                 gap: "0.65rem"
             }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -944,15 +1164,28 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                         <span style={{ color: "#10b981" }}>CALL SIDE</span>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(60, 1fr)", gap: "2px", height: "28px" }}>
-                        {Array.from({ length: 60 }).map((_, idx) => {
-                            const isPutSide = idx < 30;
-                            const intensity = Math.min((idx % 7 + 2) * 0.15, 0.9);
+                    {/* Per-strike gamma heat strip driven by the real gex_curve —
+                        the deterministic 60-cell color pattern that used to live
+                        here rendered the same "data" for every asset and expiry. */}
+                    {sortedStrikes.length === 0 ? (
+                        <div style={{ fontSize: "0.62rem", color: "#64748b", padding: "0.35rem 0" }}>
+                            No per-strike gamma data in the current board.
+                        </div>
+                    ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(sortedStrikes.length, 14)}, 1fr)`, gap: "2px", height: "28px" }}>
+                        {[...sortedStrikes].reverse().map((item) => {
+                            const maxAbs = Math.max(
+                                ...sortedStrikes.map((s) => Math.abs(s.net_gex || 0)),
+                                1e-9,
+                            );
+                            const intensity = Math.min(Math.abs(item.net_gex || 0) / maxAbs, 1) * 0.75 + 0.08;
+                            const neg = (item.net_gex || 0) < 0;
                             return (
                                 <div
-                                    key={idx}
+                                    key={item.strike}
+                                    title={`$${item.strike.toLocaleString()} · net GEX ${item.net_gex}M`}
                                     style={{
-                                        background: isPutSide
+                                        background: neg
                                             ? `rgba(244, 63, 94, ${intensity})`
                                             : `rgba(16, 185, 129, ${intensity})`,
                                         borderRadius: "1px"
@@ -961,6 +1194,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             );
                         })}
                     </div>
+                    )}
 
                     {/* Dynamic Heatmap Axis Labels */}
                     {(() => {

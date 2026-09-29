@@ -1,9 +1,15 @@
 import logging
+import time
 import traceback
 from datetime import datetime
+from math import floor, log10
 from typing import Any
 
 from tpt.adapters.options_aggregator import aggregate_multi_venue_options_board
+from tpt.engine.gamma_analytics import (
+    compute_institutional_analytics,
+    get_regime_tracker,
+)
 from tpt.engine.greeks_engine import (
     compute_greeks,
     compute_greeks_batch,
@@ -11,6 +17,7 @@ from tpt.engine.greeks_engine import (
     dealer_vanna_exposure,
     dealer_charm_exposure,
 )
+from tpt.engine.oi_history import compute_oi_flow, maybe_record_snapshot
 from tpt.engine.vol_surface import build_surfaces_from_board, get_iv_from_surface
 
 logger = logging.getLogger("tpt.engine.options_flow")
@@ -73,13 +80,58 @@ def parse_expiry(expiry_str: Any) -> float:
         return 7.0 / 365.25
 
 
-async def calculate_macro_gamma_exposure(underlying: str, spot_price: float = 0.0, expiry_filter: str = "ALL") -> dict[str, Any]:
+async def calculate_macro_gamma_exposure(
+    underlying: str,
+    spot_price: float = 0.0,
+    expiry_filter: str = "ALL",
+    allow_synthetic: bool = False,
+) -> dict[str, Any]:
     """
     Industry-standard Dealer GEX calculation (SpotGamma / Quantwheel methodology).
+
+    ``allow_synthetic``: when the venue board comes back empty, fabricate a
+    synthetic options board anchored to the spot price. This is ONLY sane for
+    the majors (BTC/ETH) whose gamma regime the desk tracks through Deribit
+    outages — for every other underlying there is no options market at all,
+    and a synthetic board built around a wrong spot produced level fields in
+    a completely different price domain (BTC-scale levels rendered on altcoin
+    charts). Default is strict: no board → honest "unavailable" payload.
     """
     try:
         board, venue_metrics = await aggregate_multi_venue_options_board(underlying)
         
+        # Strict underlying asset validation first — cheap, deterministic, and
+        # it lets the common "no options market" exit below fire before any
+        # network spot-fetch is attempted.
+        board = [x for x in board if isinstance(x, dict) and x.get("underlying", "").upper() == underlying.upper()]
+
+        # No options market and synthetic fallback disabled: refuse to invent
+        # levels. The old fallback chain ended in a hardcoded BTC price
+        # (85875.50) that silently anchored every synthetic strike — BTC-scale
+        # gamma levels leaked onto altcoin charts and into altcoin scoring
+        # inputs (iv_skew, gamma_wall_proximity).
+        if not board and not allow_synthetic:
+            logger.info(
+                "[GEX Engine] %s has no options board and synthetic fallback is "
+                "disabled — returning an honest empty payload.",
+                underlying,
+            )
+            return {
+                "underlying":                underlying,
+                "expiry_filter":             expiry_filter,
+                "options_available":         False,
+                "spot_price":                spot_price,
+                "total_net_gex_millions":    0.0,
+                "gamma_flip":                None,
+                "call_wall":                 None,
+                "put_wall":                  None,
+                "gamma_walls":               [],
+                "gex_curve":                 [],
+                "regime":                    "UNAVAILABLE",
+                "venue_metrics":             {"active_venues": [], "total_venues": 0},
+                "message": f"No options market data available for {underlying} — GEX levels are not shown.",
+            }
+
         # Extract or fetch live spot price first
         if spot_price <= 0 and board:
             for item in board:
@@ -98,18 +150,38 @@ async def calculate_macro_gamma_exposure(underlying: str, spot_price: float = 0.
             except Exception as pe:
                 logger.warning(f"Could not fetch spot fallback for {underlying}: {pe}")
 
-
         if spot_price <= 0:
-            spot_price = 2642.48 if underlying.upper() == "ETH" else 142.50 if underlying.upper() == "SOL" else 24.80 if underlying.upper() == "AVAX" else 85875.50
+            if not allow_synthetic:
+                # Real board but no spot: Greeks at spot 0 are meaningless.
+                return {
+                    "underlying":                underlying,
+                    "expiry_filter":             expiry_filter,
+                    "options_available":         False,
+                    "spot_price":                0.0,
+                    "gamma_flip":                None,
+                    "call_wall":                 None,
+                    "put_wall":                  None,
+                    "gamma_walls":               [],
+                    "gex_curve":                 [],
+                    "regime":                    "UNAVAILABLE",
+                    "message": f"Could not determine spot price for {underlying} — GEX levels withheld.",
+                }
+            # Majors-only legacy fallback so the BTC/ETH regime panel survives a
+            # Deribit outage. These are the last hardcoded prices in the engine.
+            spot_price = 2642.48 if underlying.upper() == "ETH" else 85875.50
 
-        # Strict underlying asset validation
-        board = [x for x in board if isinstance(x, dict) and x.get("underlying", "").upper() == underlying.upper()]
-
-        # Synthetic fallback for altcoins or empty boards with distinct term structures
+        # Synthetic fallback — opt-in (BTC/ETH only) — with distinct term structures
         if not board:
             board = []
-            multiplier = 10.0 if spot_price > 1000 else (1.0 if spot_price > 50 else 0.5)
-            center_strike = round(spot_price / multiplier) * multiplier
+            # Quantize strikes to 3 significant figures so the grid tracks the
+            # instrument's own magnitude: 92,000 for BTC, 0.0052 for a sub-penny
+            # alt (the old fixed-multiplier grid collapsed everything below $0.50
+            # onto a single strike).
+            def _q3(v: float) -> float:
+                m = 10.0 ** (floor(log10(abs(v))) - 2)
+                return round(v / m) * m
+
+            center_strike = _q3(spot_price)
             offsets = [-0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.20]
             
             term_configs = [
@@ -119,7 +191,7 @@ async def calculate_macro_gamma_exposure(underlying: str, spot_price: float = 0.
             ]
             for exp_tag, dte_days, base_oi in term_configs:
                 for off in offsets:
-                    stk = round(center_strike * (1.0 + off) / multiplier) * multiplier
+                    stk = _q3(center_strike * (1.0 + off))
                     oi_val = max(10.0, base_oi * (1.0 - abs(off) * 0.7))
                     # Call option
                     board.append({
@@ -510,6 +582,50 @@ async def calculate_macro_gamma_exposure(underlying: str, spot_price: float = 0.
         except Exception as of_err:
             logger.debug("Orderflow enrichment skipped: %s", of_err)
 
+        # ──────────────────────────────────────────────────────────────────────
+        # 6. INSTITUTIONAL ANALYTICS — max pain, skew, expiry clusters, hedging
+        #    profile, pin map, OI flows, confidence grade. All from real data.
+        # ──────────────────────────────────────────────────────────────────────
+        try:
+            analytics = compute_institutional_analytics(
+                board=board,
+                spot_price=spot_price,
+                strike_net_gex=strike_net_gex,
+                strike_call_gex=strike_call_gex,
+                strike_put_gex=strike_put_gex,
+                strike_call_oi=strike_call_oi,
+                strike_put_oi=strike_put_oi,
+                venue_metrics=venue_metrics,
+                vol_surface_fitted=vol_surface_fitted,
+            )
+        except Exception as a_err:
+            logger.warning("Institutional analytics failed for %s: %s", underlying, a_err)
+            analytics = {}
+
+        try:
+            oi_flow = await compute_oi_flow(underlying, board)
+        except Exception as of_err2:
+            logger.warning("OI flow computation failed for %s: %s", underlying, of_err2)
+            oi_flow = None
+
+        # Regime tracking: confirm flips only after they hold. The tracker is
+        # module-level, so the 15s sync loop's observations accumulate here.
+        flip_alert = None
+        try:
+            regime_name = "LONG_GAMMA_STABLE" if total_gex >= 0 else "SHORT_GAMMA_VOLATILE"
+            flip_alert = get_regime_tracker().observe(underlying, regime_name, spot_price)
+            if flip_alert:
+                from tpt.engine.gamma_alerts import fire_gamma_flip_alert
+                await fire_gamma_flip_alert(underlying, flip_alert)
+        except Exception as rt_err:
+            logger.debug("Regime tracking skipped for %s: %s", underlying, rt_err)
+
+        recent_flips = []
+        try:
+            recent_flips = get_regime_tracker().transitions(underlying)
+        except Exception:
+            pass
+
         logger.info(
             f"[GEX Engine] {underlying}  spot={spot_price:.0f}  "
             f"call_wall={call_wall_strike:.0f}  put_wall={put_wall_strike:.0f}  "
@@ -521,6 +637,16 @@ async def calculate_macro_gamma_exposure(underlying: str, spot_price: float = 0.
         return {
             "underlying":                underlying,
             "expiry_filter":             expiry_filter,
+            "options_available":         True,
+            "computed_at":               round(time.time(), 3),
+            "max_pain":                  analytics.get("max_pain"),
+            "skew":                      analytics.get("skew"),
+            "expiry_clusters":           analytics.get("expiry_clusters", []),
+            "hedging_profile":           analytics.get("hedging_profile"),
+            "pin_map":                   analytics.get("pin_map", []),
+            "oi_flow":                   oi_flow,
+            "confidence":                analytics.get("confidence"),
+            "regime_transitions":        recent_flips,
             "spot_price":                spot_price,
             "total_net_gex_millions":    round(total_gex / 1e6, 2),
             "net_dealer_delta_millions": round(total_dealer_delta / 1e6, 2),

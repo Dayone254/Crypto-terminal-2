@@ -541,7 +541,11 @@ export default function EdgePage() {
                                 </span>
 
                                 <span style={{ ...statusStyle(selectedTrade.status, !!selectedTrade.filled_at), padding: "0.2rem 0.65rem", borderRadius: "5px", fontSize: "0.65rem", fontWeight: 900 }}>
-                                    {selectedTrade.status === "WIN" ? "✓ WIN (TARGET HIT)" : selectedTrade.status === "LOSS" ? "✕ LOSS (STOPPED OUT)" : "⏳ PENDING FILL"}
+                                    {selectedTrade.status === "WIN"
+                                        ? "✓ WIN (TARGET HIT)"
+                                        : selectedTrade.status === "LOSS"
+                                            ? "✕ LOSS (STOPPED OUT)"
+                                            : statusLabel(selectedTrade.status, !!selectedTrade.filled_at)}
                                 </span>
                             </div>
 

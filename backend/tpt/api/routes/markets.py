@@ -312,7 +312,10 @@ async def get_options_flow(product_id: str = "BTC-USD", underlying: str | None =
     if cached and isinstance(cached, dict) and expiry.upper() == "ALL":
         return cached
 
-    res = await calculate_macro_gamma_exposure(symbol_coin, 0.0, expiry_filter=expiry)
+    # Majors keep the legacy synthetic-board fallback (desk regime panel);
+    # every other underlying gets an honest "no options market" payload.
+    allow_synth = symbol_coin in ("BTC", "ETH")
+    res = await calculate_macro_gamma_exposure(symbol_coin, 0.0, expiry_filter=expiry, allow_synthetic=allow_synth)
     if res and expiry.upper() == "ALL":
         ws_memory.macro_options_cache[symbol_coin] = res
     return res or {}

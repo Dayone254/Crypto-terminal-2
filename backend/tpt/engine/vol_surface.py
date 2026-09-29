@@ -40,9 +40,14 @@ _MIN_POINTS_FOR_FIT = 5
 # Import pysabr — graceful fallback if missing
 # ---------------------------------------------------------------------------
 try:
-    from pysabr import Hagan2002LognormalSABR as _SABR
+    # Use pysabr's pure Hagan-2002 expansion function and calibrate directly.
+    # The pysabr wrapper class anchors to an ATM normal vol and expects percent
+    # volatiles, which does not match our decimal-vol venue data; a direct
+    # least-squares fit on the raw points is simpler and deterministic.
+    from pysabr.models.hagan_2002_lognormal_sabr import lognormal_vol as _hagan_lognormal_vol
+    from scipy.optimize import least_squares as _least_squares
     _SABR_AVAILABLE = True
-    logger.info("pysabr loaded — SABR vol surface active")
+    logger.info("pysabr Hagan-2002 SABR loaded — SABR vol surface active")
 except Exception as _e:
     _SABR_AVAILABLE = False
     logger.warning("pysabr unavailable (%s); SABR surface will be skipped", _e)
@@ -108,32 +113,41 @@ def build_vol_surface(
 
     sorted_ks = np.array(sorted(strike_iv_map.keys()), dtype=float)
     avg_vs = np.array([sum(strike_iv_map[k]) / len(strike_iv_map[k]) for k in sorted_ks], dtype=float)
+    # Raw per-strike IVs (averaged across venues) — fallback for lookups the
+    # fitted smile cannot serve.
+    raw_map = {float(k): float(v) for k, v in zip(sorted_ks.tolist(), avg_vs.tolist())}
 
     try:
-        sabr = _SABR(
-            beta=beta,
-            f=forward,
-            shift=0.0,
-            t=T,
-            lognormal_shift=0.0,
+        # Calibrate (α, ρ, ν) against the observed smile in DECIMAL vols using
+        # Hagan's 2002 expansion. β stays fixed at the crypto-typical 0.5.
+        def _residual(params) -> np.ndarray:
+            a, r, v = params
+            model = np.array(
+                [_hagan_lognormal_vol(k, forward, T, a, beta, r, v) for k in sorted_ks],
+                dtype=float,
+            )
+            return model - avg_vs
+
+        # α ≈ IV × F^(1-β) is the classic zero-rho starting point.
+        alpha0 = max(float(avg_vs.mean()) * forward ** (1.0 - beta), 1e-4)
+        fit = _least_squares(
+            _residual,
+            x0=np.array([alpha0, 0.0, 0.5]),
+            bounds=([1e-6, -0.999, 1e-6], [np.inf, 0.999, np.inf]),
+            max_nfev=200,
         )
-        # Calibrate α, ρ, ν to minimise vol errors at observed strikes
-        sabr.fit(sorted_ks, avg_vs)
-        params = sabr.params
 
         surface = VolSurface(
-            alpha=float(params.get("alpha", 0.5)),
+            alpha=float(fit.x[0]),
             beta=beta,
-            rho=float(params.get("rho", 0.0)),
-            nu=float(params.get("nu", 0.5)),
+            rho=float(fit.x[1]),
+            nu=float(fit.x[2]),
             forward=forward,
             T=T,
             strike_min=float(sorted_ks.min()),
             strike_max=float(sorted_ks.max()),
             raw_map=raw_map,
         )
-        # Attach the calibrated evaluator so get_iv_from_surface never needs to re-instantiate
-        surface._sabr_obj = sabr
         return surface
     except Exception as exc:
         logger.debug("SABR calibration failed: %s", exc)
@@ -164,27 +178,22 @@ def get_iv_from_surface(
         return raw_iv_fallback
 
     try:
-        # Use cached SABR object if available (avoids re-instantiation per lookup)
-        sabr = getattr(surface, "_sabr_obj", None)
-        if sabr is None:
-            # Lazy rebuild for surfaces created before caching was added
-            sabr = _SABR(
-                beta=surface.beta,
-                f=surface.forward,
-                shift=0.0,
-                t=surface.T,
-                lognormal_shift=0.0,
+        iv = float(
+            _hagan_lognormal_vol(
+                strike, surface.forward, surface.T,
+                surface.alpha, surface.beta, surface.rho, surface.nu,
             )
-            sabr.alpha = surface.alpha
-            sabr.rho   = surface.rho
-            sabr.nu    = surface.nu
-            surface._sabr_obj = sabr
-        iv = float(sabr.lognormal_vol(strike))
+        )
         # Sanity check — SABR can produce garbage for extreme parametrisations
         if 0.01 <= iv <= 5.0:
             return iv
     except Exception:
         pass
+
+    # Fallback: the raw IV observed at this exact strike, when we have one
+    raw_at_strike = surface.raw_map.get(float(strike))
+    if raw_at_strike is not None and 0.01 <= raw_at_strike <= 5.0:
+        return float(raw_at_strike)
 
     return raw_iv_fallback
 

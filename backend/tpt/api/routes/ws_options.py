@@ -42,9 +42,12 @@ async def options_flow_stream(websocket: WebSocket, product_id: str, expiry: str
             try:
                 options_data = ws_memory.get_macro_options(underlying) if expiry.upper() == "ALL" else None
                 if not options_data:
-                    # If not cached yet or expiry filter is active, compute exposure
+                    # If not cached yet or expiry filter is active, compute exposure.
+                    # Majors keep the legacy synthetic-board fallback; every other
+                    # underlying gets an honest "no options market" payload.
                     from tpt.engine.options_flow import calculate_macro_gamma_exposure
-                    options_data = await calculate_macro_gamma_exposure(underlying, 0.0, expiry_filter=expiry)
+                    allow_synth = underlying in ("BTC", "ETH")
+                    options_data = await calculate_macro_gamma_exposure(underlying, 0.0, expiry_filter=expiry, allow_synthetic=allow_synth)
                     if options_data and expiry.upper() == "ALL":
                         ws_memory.macro_options_cache[underlying] = options_data
 
