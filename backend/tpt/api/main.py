@@ -203,6 +203,9 @@ def create_app() -> FastAPI:
     application.include_router(config.router, prefix="/api/v1/config", tags=["config"])
     application.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])
 
+    from tpt.api.routes import scanner_meta
+    application.include_router(scanner_meta.router, prefix="/api/v1", tags=["markets"])
+
     from tpt.api.routes import backtest, catalyst, research, ws_candles, ws_l2, ws_options
     application.include_router(ws_l2.router, prefix="/api/v1/ws/l2", tags=["websockets"])
     application.include_router(ws_candles.router, prefix="/api/v1/ws/candles", tags=["websockets"])

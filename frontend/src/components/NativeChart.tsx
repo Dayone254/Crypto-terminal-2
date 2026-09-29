@@ -553,6 +553,13 @@ export const NativeChart: React.FC<NativeChartProps> = ({
         chart.setSymbol({ ticker: productId, pricePrecision: 4, volumePrecision: 2 });
         chart.setPeriod({ type: periodType as any, span: periodSpan });
 
+        // Zoom the bounded initial window to the visible viewport: ~120 bars
+        // across, so candles render at readable width instead of the 1000-bar
+        // sub-pixel squash. Scrolling left still pages in older history.
+        try {
+            chart.setBarSpace(Math.max(4, Math.floor((chartContainerRef.current?.clientWidth ?? 1200) / 120)));
+        } catch { /* older builds: chart defaults apply */ }
+
         chart.setDataLoader({
             getBars: async (params: any) => {
                 const { type, callback } = params;
@@ -561,10 +568,12 @@ export const NativeChart: React.FC<NativeChartProps> = ({
                 const oldestTs = dataList.length > 0 ? dataList[0].timestamp : null;
 
                 if (type === "init" || type === "update") {
-                    // Initial load: request 1000 candles (DB history + live fill-gap)
+                    // Initial load: bounded window. 1000 candles crammed every
+                    // bar into a few pixels; a 300-bar window renders readably
+                    // and scrolling left still pages in older history on demand.
                     try {
                         const res = await apiFetch(
-                            `/api/v1/markets/${productId}/candles?granularity=${granularity}&limit=1000`
+                            `/api/v1/markets/${productId}/candles?granularity=${granularity}&limit=300`
                         );
                         if (!res.ok) {
                             callback([], false);

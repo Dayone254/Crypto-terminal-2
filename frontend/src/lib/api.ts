@@ -228,6 +228,42 @@ export async function fetchCandidates(): Promise<CandidateRow[]> {
     return res.json();
 }
 
+// ── Scanner enrichment (real 1h delta, CVD, sparkline, universe size) ─────────
+
+export interface ScannerEnrichment {
+    change_1h_pct: number | null;
+    cvd_24h_usd: number | null;
+    sparkline: number[] | null;
+}
+
+export async function fetchScannerEnrichment(productIds: string[]): Promise<Record<string, ScannerEnrichment>> {
+    if (!productIds.length) return {};
+    const res = await apiFetch(`/api/v1/scanner/enrichment?product_ids=${encodeURIComponent(productIds.slice(0, 60).join(","))}`);
+    if (!res.ok) throw new Error(`Scanner enrichment failed: ${res.status}`);
+    return res.json();
+}
+
+export async function fetchUniverseCount(): Promise<number | null> {
+    try {
+        const res = await apiFetch("/api/v1/scanner/universe-count");
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data?.universe_count ?? null;
+    } catch {
+        return null;
+    }
+}
+
+export async function fetchSystemConfig(): Promise<{ telegram_configured: boolean } | null> {
+    try {
+        const res = await apiFetch("/api/v1/config");
+        if (!res.ok) return null;
+        return await res.json();
+    } catch {
+        return null;
+    }
+}
+
 export interface HistoricalSetup {
     computed_at: string;
     trade_direction: string;

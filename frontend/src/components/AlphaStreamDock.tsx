@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { Send, Bell, Sliders, Webhook, Zap, RefreshCw, ChevronLeft, ChevronRight, Volume2, ShieldAlert, TrendingUp, Layers, Play } from "lucide-react";
-import { apiFetch, AlertRow, fetchAlerts, fetchPendingAlerts } from "@/lib/api";
+import { apiFetch, AlertRow, fetchAlerts, fetchPendingAlerts, fetchSystemConfig } from "@/lib/api";
 import { playAlertSound, SoundAlertType } from "@/lib/soundAlerts";
 
 export type AlertCategory = "ALL" | "WHALES" | "OI SPIKES" | "SWEEPS";
@@ -109,10 +109,8 @@ export const AlphaStreamDock: React.FC<AlphaStreamDockProps> = ({ isCollapsed, o
             }
             setPendingCount(pending?.length || 0);
             setError(null);
-            setTelegramStatus("CONNECTED");
         } catch (err: any) {
             setAlerts([]);
-            setTelegramStatus("OFFLINE");
         } finally {
             setLoading(false);
         }
@@ -123,6 +121,19 @@ export const AlphaStreamDock: React.FC<AlphaStreamDockProps> = ({ isCollapsed, o
         const interval = setInterval(loadAlerts, 12000);
         return () => clearInterval(interval);
     }, [loadAlerts]);
+
+    // Telegram badge reflects the backend's real Telegram configuration
+    // (token + chat id set), not just "the alerts API answered".
+    useEffect(() => {
+        let cancelled = false;
+        const check = async () => {
+            const cfg = await fetchSystemConfig();
+            if (!cancelled) setTelegramStatus(cfg ? (cfg.telegram_configured ? "CONNECTED" : "OFFLINE") : "OFFLINE");
+        };
+        check();
+        const interval = setInterval(check, 60000);
+        return () => { cancelled = true; clearInterval(interval); };
+    }, []);
 
     // Active Category Filter Logic
     const filteredAlerts = alerts.filter((item) => {

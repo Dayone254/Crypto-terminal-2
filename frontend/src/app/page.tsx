@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { CandidateRow, fetchCandidates, triggerScan } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { CandidateRow, fetchCandidates, triggerScan, pinSymbol, unpinSymbol, fetchScannerEnrichment, fetchUniverseCount } from "@/lib/api";
 import { getCachedData, setCachedData } from "@/lib/cache";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
@@ -11,12 +12,14 @@ import { AlphaStreamDock } from "@/components/AlphaStreamDock";
 import { Search } from "lucide-react";
 
 export default function DashboardPage() {
+    const router = useRouter();
     const [rawCandidates, setRawCandidates] = useState<CandidateRow[]>([]);
     const [selectedFilter, setSelectedFilter] = useState<string>("ALL");
     const [searchQuery, setSearchQuery] = useState<string>("");
-    const [selectedTimeframe, setSelectedTimeframe] = useState<string>("1H");
     const [toastMessage, setToastMessage] = useState<string | null>(null);
     const [isAlertDockCollapsed, setIsAlertDockCollapsed] = useState<boolean>(false);
+    const [enrichment, setEnrichment] = useState<Record<string, { change_1h_pct: number | null; cvd_24h_usd: number | null; sparkline: number[] | null }>>({});
+    const [universeCount, setUniverseCount] = useState<number | null>(null);
 
     // Safely populate from client cache post-hydration without triggering SSR mismatch
     useEffect(() => {
@@ -32,10 +35,22 @@ export default function DashboardPage() {
             if (candData && Array.isArray(candData)) {
                 setRawCandidates(candData);
                 setCachedData("scanner_candidates", candData);
+                // Real per-symbol enrichment (1h delta / CVD / sparkline),
+                // refreshed on the same cadence as the candidates.
+                fetchScannerEnrichment(candData.map((r) => r.product_id))
+                    .then(setEnrichment)
+                    .catch(() => { /* keep last good enrichment */ });
             }
         } catch (err) {
             console.error("Dashboard data load error:", err);
         }
+    }, []);
+
+    // Universe size: number of USDT perps actually trading upstream.
+    useEffect(() => {
+        fetchUniverseCount().then(setUniverseCount);
+        const interval = setInterval(() => fetchUniverseCount().then(setUniverseCount), 300000);
+        return () => clearInterval(interval);
     }, []);
 
     useEffect(() => {
@@ -43,6 +58,22 @@ export default function DashboardPage() {
         const interval = setInterval(loadData, 5000);
         return () => clearInterval(interval);
     }, [loadData]);
+
+    // Real watchlist toggle: persists via the watchlist API and flips the
+    // row's pinned flag so the WATCHLIST filter reflects it immediately.
+    const handlePinCandidate = useCallback(async (sym: string) => {
+        const current = rawCandidates.find((r) => r.product_id === sym);
+        const willPin = !(current?.pinned);
+        try {
+            const res = willPin ? await pinSymbol(sym) : await unpinSymbol(sym);
+            const nowPinned = (res as { on_watchlist?: boolean })?.on_watchlist ?? willPin;
+            setRawCandidates((rows) => rows.map((r) => (r.product_id === sym ? { ...r, pinned: nowPinned } : r)));
+            setToastMessage(`${nowPinned ? "Pinned" : "Unpinned"} ${sym}`);
+        } catch {
+            setToastMessage(`Failed to update watchlist for ${sym}`);
+        }
+        setTimeout(() => setToastMessage(null), 2000);
+    }, [rawCandidates]);
 
     const handleRunScan = async () => {
         try {
@@ -57,65 +88,60 @@ export default function DashboardPage() {
         }
     };
 
-    // Transform backend rows into rich PRO-CORE candidates
-    const transformedCandidates: Candidate[] = rawCandidates.map((r, idx) => {
-        const score = Math.round(r.composite_score || 75);
+    // Transform backend rows into candidates. Every displayed number is real:
+    // when the backend has no value the column renders an honest dash.
+    const transformedCandidates: Candidate[] = rawCandidates.map((r) => {
+        const score = Math.round(r.composite_score || 0);
         const rankTag: Candidate["rankTag"] =
             score >= 95 ? "ELITE" : score >= 88 ? "PRIME" : score >= 80 ? "ALPHA" : score >= 70 ? "EARLY" : "ACTIVE";
 
-        const classifications = [
-            "COILED SQUEEZE BREAK",
-            "ABSORPTION ZONE",
-            "CVD DIVERGENCE",
-            "VOL SQUEEZE BREAK",
-            "GAMMA ACCELERATION",
-            "EARLY MOMENTUM",
-        ];
-        const classification = r.label || classifications[idx % classifications.length];
+        const enr = enrichment[r.product_id];
 
         return {
             id: r.product_id,
             symbol: r.product_id,
-            sector: r.product_id.includes("BTC") || r.product_id.includes("ETH") ? "L1 TOP" : r.product_id.includes("SUI") || r.product_id.includes("SOL") ? "L1 HIGH" : "DEFI/ALT",
-            exchange: "BINANCE / BYBIT",
-            price: r.last_price || 100,
-            priceChange: (r.last_price * (r.day_change_pct || 1)) / 100,
-            change24h: r.day_change_pct || 0,
-            change1h: (r.day_change_pct || 0) * 0.25,
+            sector: r.coverage_band || "—",
+            exchange: "BINANCE PERP",
+            price: r.last_price ?? 0,
+            priceChange: r.last_price && r.day_change_pct != null ? (r.last_price * r.day_change_pct) / 100 : 0,
+            change24h: r.day_change_pct ?? 0,
+            change1h: enr?.change_1h_pct ?? null,
             score: score,
             rankTag: rankTag,
-            classification: classification,
-            pir: r.pos_in_range || 0.65,
-            pirTag: r.pos_in_range > 0.7 ? "TOP" : "MID",
-            quoteVol: r.quote_vol_24h || 45000000,
-            cvd: (r.day_change_pct >= 0 ? 1 : -1) * (r.quote_vol_24h ? r.quote_vol_24h * 0.12 : 2400000),
-            trancheA: r.ladder ? `$${r.ladder.tranche_a_price.toFixed(2)} LIMIT` : "60% @ LIMIT",
-            trancheB: r.ladder ? `$${r.ladder.tranche_b_price.toFixed(2)} MARKET` : "40% @ MARKET",
+            classification: r.label || "UNCLASSIFIED",
+            pir: r.pos_in_range ?? 0,
+            pirTag: (r.pos_in_range ?? 0) > 0.7 ? "TOP" : "MID",
+            quoteVol: r.quote_vol_24h ?? 0,
+            cvd: enr?.cvd_24h_usd ?? null,
+            trancheA: r.ladder ? `$${r.ladder.tranche_a_price.toFixed(2)} LIMIT` : "—",
+            trancheB: r.ladder ? `$${r.ladder.tranche_b_price.toFixed(2)} MARKET` : "—",
             pinned: r.pinned || false,
-            sparklineData: [10, 15, 12, 18, 25, 22, 30],
+            sparklineData: enr?.sparkline ?? null,
         };
     });
 
     const displayCandidates = transformedCandidates;
 
-    // Filter logic
+    // Filter logic — matches on the backend's own labels, not synthetic fields
+    const matchesClass = (c: Candidate, re: RegExp) =>
+        re.test(c.classification.toUpperCase());
     const filteredCandidates = displayCandidates.filter((c) => {
         const matchesSearch = c.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            c.sector.toLowerCase().includes(searchQuery.toLowerCase());
+            c.classification.toLowerCase().includes(searchQuery.toLowerCase());
         if (!matchesSearch) return false;
 
-        if (selectedFilter === "ENTRY_ZONE") return c.classification.includes("BREAKOUT") || c.classification.includes("ZONE");
-        if (selectedFilter === "COILED") return c.classification.includes("SQUEEZE") || c.score >= 90;
-        if (selectedFilter === "EARLY") return c.cvd > 5000000;
+        if (selectedFilter === "ENTRY_ZONE") return matchesClass(c, /ZONE|ENTRY|ABSORPTION/);
+        if (selectedFilter === "COILED") return matchesClass(c, /COILED|SQUEEZE/);
+        if (selectedFilter === "EARLY") return matchesClass(c, /MOMENTUM|EARLY/);
         if (selectedFilter === "WATCHLIST") return c.pinned;
         return true;
     });
 
     const counts = {
         all: displayCandidates.length,
-        entry: displayCandidates.filter((c) => c.classification.includes("BREAKOUT") || c.classification.includes("ZONE")).length,
-        coiled: displayCandidates.filter((c) => c.classification.includes("SQUEEZE") || c.score >= 90).length,
-        early: displayCandidates.filter((c) => c.cvd > 5000000).length,
+        entry: displayCandidates.filter((c) => matchesClass(c, /ZONE|ENTRY|ABSORPTION/)).length,
+        coiled: displayCandidates.filter((c) => matchesClass(c, /COILED|SQUEEZE/)).length,
+        early: displayCandidates.filter((c) => matchesClass(c, /MOMENTUM|EARLY/)).length,
         watchlist: displayCandidates.filter((c) => c.pinned).length,
     };
 
@@ -131,7 +157,7 @@ export default function DashboardPage() {
 
             {/* Top Fixed Dual-Tier Header */}
             <Header
-                universeCount={512}
+                universeCount={universeCount ?? undefined}
                 activeCount={counts.all}
                 highConvictionCount={displayCandidates.filter((c) => c.score >= 95).length}
                 selectedFilter={selectedFilter}
@@ -225,38 +251,9 @@ export default function DashboardPage() {
                                 />
                             </div>
 
-                            {/* Timeframe Buttons */}
-                            <div
-                                style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    backgroundColor: "var(--surface-container-lowest)",
-                                    padding: "0.15rem",
-                                    borderRadius: "4px",
-                                }}
-                            >
-                                {["15M", "1H", "4H", "1D"].map((tf) => {
-                                    const activeTf = selectedTimeframe === tf;
-                                    return (
-                                        <button
-                                            key={tf}
-                                            onClick={() => setSelectedTimeframe(tf)}
-                                            className="font-label-caps"
-                                            style={{
-                                                padding: "0.25rem 0.45rem",
-                                                borderRadius: "3px",
-                                                border: "none",
-                                                cursor: "pointer",
-                                                backgroundColor: activeTf ? "var(--surface-container-high)" : "transparent",
-                                                color: activeTf ? "var(--primary-fixed-dim)" : "var(--outline)",
-                                                fontWeight: activeTf ? 700 : 500,
-                                            }}
-                                        >
-                                            {tf}
-                                        </button>
-                                    );
-                                })}
-                            </div>
+                            {/* Timeframe buttons removed: the scanner is a 24h/
+                                1h-scan snapshot, not a per-timeframe view — the
+                                buttons previously changed state nothing consumed. */}
                         </div>
                     </div>
 
@@ -268,14 +265,11 @@ export default function DashboardPage() {
                                 <MarketScannerTable
                                     candidates={filteredCandidates}
                                     onSelectCandidate={(c) => {
-                                        window.location.href = `/market/${encodeURIComponent(c.symbol)}`;
+                                        router.push(`/market/${encodeURIComponent(c.symbol)}`);
                                     }}
-                                    onPinCandidate={(sym) => {
-                                        setToastMessage(`Toggled pin for ${sym}`);
-                                        setTimeout(() => setToastMessage(null), 2000);
-                                    }}
+                                    onPinCandidate={handlePinCandidate}
                                     onFastStageOrder={(c) => {
-                                        window.location.href = `/market/${encodeURIComponent(c.symbol)}`;
+                                        router.push(`/market/${encodeURIComponent(c.symbol)}`);
                                     }}
                                 />
                             ) : (

@@ -42,7 +42,7 @@ async function fetchSafeJson(url: string) {
 }
 
 export const Header: React.FC<HeaderProps> = ({
-    universeCount = 512,
+    universeCount = 0,
     activeCount = 0,
     highConvictionCount = 0,
     selectedFilter = "ALL",
@@ -239,7 +239,7 @@ export const Header: React.FC<HeaderProps> = ({
                     >
                         <div className="font-mono-data-compact" style={{ display: "flex", gap: "0.25rem" }}>
                             <span style={{ color: "var(--on-surface-variant)" }}>UNIVERSE:</span>
-                            <span style={{ color: "var(--on-surface)", fontWeight: 700 }}>{universeCount}</span>
+                            <span style={{ color: "var(--on-surface)", fontWeight: 700 }}>{universeCount > 0 ? universeCount : "—"}</span>
                         </div>
                         <span style={{ color: "var(--outline-variant)" }}>|</span>
                         <div className="font-mono-data-compact" style={{ display: "flex", gap: "0.25rem" }}>

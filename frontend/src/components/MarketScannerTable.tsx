@@ -11,18 +11,21 @@ export interface Candidate {
     price: number;
     priceChange: number;
     change24h: number;
-    change1h: number;
+    /** Real 1h delta from the enrichment endpoint; null = upstream unavailable. */
+    change1h: number | null;
     score: number;
     rankTag: "ELITE" | "PRIME" | "ALPHA" | "EARLY" | "ACTIVE" | "CHASE";
     classification: string;
     pir: number;
     pirTag: string;
     quoteVol: number;
-    cvd: number;
+    /** Real 24h CVD (Σ signed 1h volume); null = upstream unavailable. */
+    cvd: number | null;
     trancheA: string;
     trancheB: string;
     pinned?: boolean;
-    sparklineData: number[];
+    /** Real 24×1h close series; null = upstream unavailable. */
+    sparklineData: number[] | null;
 }
 
 interface MarketScannerTableProps {
@@ -49,8 +52,27 @@ export const MarketScannerTable: React.FC<MarketScannerTableProps> = ({
     const fmtVol = (v: number) =>
         v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(1)}K` : `$${v.toFixed(0)}`;
 
-    const fmtCvd = (c: number) =>
-        c > 0 ? `+$${(c / 1e6).toFixed(2)}M CVD` : `-$${(Math.abs(c) / 1e6).toFixed(2)}M CVD`;
+    const fmtCvd = (c: number | null) =>
+        c === null || !Number.isFinite(c)
+            ? "— CVD"
+            : c >= 0
+                ? `+$${(c / 1e6).toFixed(2)}M CVD`
+                : `-$${(Math.abs(c) / 1e6).toFixed(2)}M CVD`;
+
+    // Real close-series sparkline: 24 points scaled into an 80×20 viewBox.
+    const sparkPath = (data: number[] | null): string | null => {
+        if (!data || data.length < 2) return null;
+        const min = Math.min(...data);
+        const max = Math.max(...data);
+        const range = max - min || 1;
+        return data
+            .map((v, i) => {
+                const x = (i / (data.length - 1)) * 80;
+                const y = 18 - ((v - min) / range) * 16;
+                return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+            })
+            .join(" ");
+    };
 
     return (
         <div
@@ -167,13 +189,15 @@ export const MarketScannerTable: React.FC<MarketScannerTableProps> = ({
                                     {/* LAST PRICE */}
                                     <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
                                         <span className="font-mono-data-primary" style={{ fontWeight: 700, color: "var(--on-surface)" }}>
-                                            ${fmtPrice(c.price)}
+                                            {c.price > 0 ? `$${fmtPrice(c.price)}` : "—"}
                                         </span>
                                         <div
                                             className="font-mono-data-compact"
                                             style={{ color: isPositive ? "var(--primary-fixed-dim)" : "var(--secondary)" }}
                                         >
-                                            {isPositive ? "▲ +" : "▼ -"}${Math.abs(c.priceChange).toFixed(c.price < 1 ? 5 : 2)}
+                                            {c.price > 0 && c.priceChange !== 0
+                                                ? `${isPositive ? "▲ +" : "▼ -"}$${Math.abs(c.priceChange).toFixed(c.price < 1 ? 5 : 2)}`
+                                                : "—"}
                                         </div>
                                     </td>
 
@@ -196,34 +220,31 @@ export const MarketScannerTable: React.FC<MarketScannerTableProps> = ({
                                                 className="font-mono-data-compact"
                                                 style={{
                                                     fontSize: "10px",
-                                                    color: c.change1h >= 0 ? "var(--primary-fixed-dim)" : "var(--secondary)",
+                                                    color: (c.change1h ?? 0) >= 0 ? "var(--primary-fixed-dim)" : "var(--secondary)",
                                                 }}
                                             >
-                                                {c.change1h >= 0 ? "+" : ""}{c.change1h.toFixed(2)}% 1H
+                                                {c.change1h === null ? "— 1H" : `${c.change1h >= 0 ? "+" : ""}${c.change1h.toFixed(2)}% 1H`}
                                             </span>
                                         </div>
                                     </td>
 
-                                    {/* 24H TAPE & CVD Sparkline */}
+                                    {/* 24H TAPE — real close-series sparkline */}
                                     <td style={{ padding: "0.5rem 0.75rem", textAlign: "center" }}>
                                         <div style={{ width: "80px", height: "20px", margin: "0 auto", display: "flex", alignItems: "center" }}>
-                                            <svg viewBox="0 0 80 20" style={{ width: "100%", height: "100%", overflow: "visible" }}>
-                                                <path
-                                                    d={isPositive ? "M0,16 Q20,18 40,8 T80,3" : "M0,4 Q20,2 40,12 T80,18"}
-                                                    fill="none"
-                                                    stroke={isPositive ? "#00e38f" : "#ffb2b7"}
-                                                    strokeWidth="1.5"
-                                                    strokeLinecap="round"
-                                                />
-                                                <path
-                                                    d={isPositive ? "M0,18 L25,16 L50,14 L80,7" : "M0,6 L30,10 L50,15 L80,19"}
-                                                    fill="none"
-                                                    opacity="0.6"
-                                                    stroke={isPositive ? "#53ffab" : "#b50036"}
-                                                    strokeDasharray="2 2"
-                                                    strokeWidth="1"
-                                                />
-                                            </svg>
+                                            {sparkPath(c.sparklineData) ? (
+                                                <svg viewBox="0 0 80 20" style={{ width: "100%", height: "100%", overflow: "visible" }}>
+                                                    <path
+                                                        d={sparkPath(c.sparklineData)!}
+                                                        fill="none"
+                                                        stroke={isPositive ? "#00e38f" : "#ffb2b7"}
+                                                        strokeWidth="1.5"
+                                                        strokeLinecap="round"
+                                                        strokeLinejoin="round"
+                                                    />
+                                                </svg>
+                                            ) : (
+                                                <span className="font-mono-data-compact" style={{ color: "var(--outline)", fontSize: "10px" }}>—</span>
+                                            )}
                                         </div>
                                     </td>
 
@@ -340,11 +361,11 @@ export const MarketScannerTable: React.FC<MarketScannerTableProps> = ({
                                     {/* 24H VOL / CVD */}
                                     <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
                                         <div className="font-mono-data-primary" style={{ fontWeight: 600, color: "var(--on-surface)" }}>
-                                            {fmtVol(c.quoteVol)}
+                                            {c.quoteVol > 0 ? fmtVol(c.quoteVol) : "—"}
                                         </div>
                                         <div
                                             className="font-mono-data-compact"
-                                            style={{ color: c.cvd >= 0 ? "var(--primary)" : "var(--secondary)", fontWeight: 500 }}
+                                            style={{ color: (c.cvd ?? 0) >= 0 ? "var(--primary)" : "var(--secondary)", fontWeight: 500 }}
                                         >
                                             {fmtCvd(c.cvd)}
                                         </div>
