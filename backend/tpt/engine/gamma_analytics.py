@@ -397,12 +397,14 @@ class GammaRegimeTracker:
         self.min_hold_seconds = min_hold_seconds
         self.history_len = history_len
         self._state: dict[str, dict[str, Any]] = {}
+        self._hydrated = False
 
     def observe(
         self, underlying: str, regime: str, spot: float, now: float | None = None,
     ) -> dict[str, Any] | None:
         """Feed one observation. Returns the committed flip (dict) or None."""
         now = time.time() if now is None else now
+        self._hydrate()
         st = self._state.setdefault(underlying, {
             "regime": regime, "since": now,
             "candidate": regime, "candidate_since": now, "transitions": [],
@@ -420,7 +422,7 @@ class GammaRegimeTracker:
         if now - st["candidate_since"] < self.min_hold_seconds:
             return None
 
-        # Flip confirmed.
+               # Flip confirmed.
         flip = {
             "ts": now, "from": st["regime"], "to": regime, "spot": spot,
         }
@@ -429,6 +431,7 @@ class GammaRegimeTracker:
         st["transitions"].append(flip)
         if len(st["transitions"]) > self.history_len:
             st["transitions"] = st["transitions"][-self.history_len:]
+        self._persist_open()
         return flip
 
     def transitions(self, underlying: str) -> list[dict[str, Any]]:
@@ -438,6 +441,81 @@ class GammaRegimeTracker:
         now = time.time() if now is None else now
         st = self._state.get(underlying)
         return None if st is None else now - st["since"]
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+    # Flip history and in-progress hold windows survive backend restarts —
+    # otherwise every deploy wipes the regime memory the UI panel and the
+    # hold-based confirmation depend on. Writes happen only on confirmed
+    # flips (rare), so contention with the main DB is a non-issue.
+
+    @staticmethod
+    def _persist_path() -> str:
+        """Small dedicated store: keeps the 5.3GB main DB out of the hot path."""
+        try:
+            from tpt.data.database import DB_PATH
+            return str(DB_PATH) + ".regime"
+        except Exception:
+            return "regime_state.db"
+
+    def _persist_open(self) -> None:
+        """Best-effort synchronous write of current state. Never raises."""
+        try:
+            import json as _json
+            import os as _os
+            import sqlite3 as _sqlite3
+
+            path = self._persist_path()
+            _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+            conn = _sqlite3.connect(path)
+            try:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS regime_state (
+                        underlying TEXT PRIMARY KEY,
+                        state_json TEXT NOT NULL,
+                        updated_at REAL NOT NULL
+                    )"""
+                )
+                conn.execute("DELETE FROM regime_state")
+                conn.executemany(
+                    "INSERT INTO regime_state (underlying, state_json, updated_at) VALUES (?, ?, ?)",
+                    [
+                        (u, _json.dumps(st), time.time())
+                        for u, st in self._state.items()
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # persistence is best-effort; never break tracking
+            logger.debug("regime tracker persist failed", exc_info=True)
+
+    def _hydrate(self) -> None:
+        """Load persisted state once, on first use after process start."""
+        if self._hydrated:
+            return
+        self._hydrated = True
+        try:
+            import json as _json
+            import os as _os
+            import sqlite3 as _sqlite3
+
+            path = self._persist_path()
+            if not _os.path.exists(path):
+                return
+            conn = _sqlite3.connect(path)
+            try:
+                rows = conn.execute("SELECT underlying, state_json FROM regime_state").fetchall()
+            finally:
+                conn.close()
+            for u, blob in rows:
+                try:
+                    self._state[u] = _json.loads(blob)
+                except Exception:
+                    continue
+            if rows:
+                logger.info("Regime tracker restored %d underlying(s) from disk.", len(rows))
+        except Exception:
+            logger.debug("regime tracker hydrate failed", exc_info=True)
 
 
 _TRACKER = GammaRegimeTracker()

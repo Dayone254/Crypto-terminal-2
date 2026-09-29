@@ -16,6 +16,22 @@ logger = logging.getLogger(__name__)
 _CLOSED = "('WIN', 'LOSS', 'BREAK_EVEN', 'PARTIAL_WIN')"
 
 
+def _shadow_exclusion() -> str:
+    """SQL fragment excluding shadow-pipeline rows.
+
+    Shadow pipelines deliberately duplicate every live signal so they can
+    collect their own parallel trade history; mixing them into the default
+    ledger triple-counts each setup (the worst cohort had 41 copies of one
+    signal) and poisons every aggregate stat, including the excursion
+    calibration that exit geometry is tuned against. NULL pipeline_version
+    rows are live rows from before the column existed.
+    """
+    return (
+        "(pipeline_version IS NULL OR pipeline_version NOT IN "
+        "(SELECT pipeline_version FROM shadow_pipelines WHERE pipeline_version IS NOT NULL))"
+    )
+
+
 def _median(xs: list[float]) -> float | None:
     if not xs:
         return None
@@ -107,14 +123,24 @@ async def component_feedback_route():
 
 @router.get("/stats")
 async def backtest_stats(
-    pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0")
+    pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0"),
+    scope: str = Query("live", description="live (default) excludes shadow pipelines; all includes them"),
 ):
     """Retrieve statistical edge performance."""
     try:
         async with get_connection() as conn:
-            params = [pipeline_version] if pipeline_version else []
-            where_clause = "WHERE pipeline_version = ?" if pipeline_version else ""
-            where_and = "AND pipeline_version = ?" if pipeline_version else ""
+            params: list[Any] = []
+            if pipeline_version:
+                where_clause = "WHERE pipeline_version = ?"
+                where_and = "AND pipeline_version = ?"
+                params.append(pipeline_version)
+            elif scope == "live":
+                excl = _shadow_exclusion()
+                where_clause = f"WHERE {excl}"
+                where_and = f"AND {excl}"
+            else:
+                where_clause = ""
+                where_and = ""
 
             async with conn.execute(f"SELECT status, COUNT(*) as cnt FROM signals {where_clause} GROUP BY status", params) as cursor:
                 rows = await cursor.fetchall()
@@ -170,6 +196,7 @@ async def list_trades(
     status: str = Query(None, description="Filter: PENDING | WIN | LOSS | ACTIVE_T2 | PARTIAL_WIN | BREAK_EVEN | EXPIRED | L2_REJECTED"),
     symbol: str = Query(None, description="Filter by symbol"),
     pipeline_version: str = Query(None, description="Filter by pipeline iteration"),
+    scope: str = Query("live", description="live (default) excludes shadow pipelines; all includes them"),
     limit: int = Query(200, le=500),
 ):
     """Return full trade ledger with optional filters."""
@@ -186,6 +213,8 @@ async def list_trades(
             if pipeline_version:
                 clauses.append("pipeline_version = ?")
                 params.append(pipeline_version)
+            elif scope == "live":
+                clauses.append(_shadow_exclusion())
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             params.append(limit)
             async with conn.execute(
@@ -201,13 +230,20 @@ async def list_trades(
 
 @router.get("/symbols")
 async def symbol_breakdown(
-    pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0")
+    pipeline_version: str | None = Query(None, description="Filter cohort, e.g. v2.0"),
+    scope: str = Query("live", description="live (default) excludes shadow pipelines; all includes them"),
 ):
     """Return per-symbol win/loss/pending breakdown for the edge leaderboard."""
     try:
         async with get_connection() as conn:
-            params = [pipeline_version] if pipeline_version else []
-            where_clause = "WHERE pipeline_version = ?" if pipeline_version else ""
+            params: list[Any] = []
+            if pipeline_version:
+                where_clause = "WHERE pipeline_version = ?"
+                params.append(pipeline_version)
+            elif scope == "live":
+                where_clause = f"WHERE {_shadow_exclusion()}"
+            else:
+                where_clause = ""
             async with conn.execute(
                 f"""
                 SELECT

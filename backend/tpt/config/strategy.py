@@ -112,32 +112,45 @@ class LadderConfig(BaseModel):
     fib_a_low: float = 0.50
     fib_a_high: float = 0.618
     fib_b_level: float = 0.786
-    target2_extension_pct: float = 5
-
+    
     # ── Risk sizing ──────────────────────────────────────────────────────────
     # The stop is bounded using the instrument's own 1h ATR, so an R means
     # roughly the same thing across assets of wildly differing volatility. The
     # old logic used a flat 3% stop with a 5% clamp, which on an asset whose
     # whole favourable excursion is 1-3% left R so wide that every R-multiple
     # target was unreachable.
-    atr_stop_mult: float = 1.5   # risk = this many 1h ATRs, before bounding
+    atr_stop_mult: float = 1.2   # risk = this many 1h ATRs, before bounding
     min_stop_pct: float = 1.0    # percent of entry: never stop inside the noise
     # Fix 3: Loosen the ATR stop clamp based on Avg MAE of -4.39% 
-    max_stop_pct: float = 6.0    # percent of entry: never so wide R dwarfs the move
+    max_stop_pct: float = 4.0    # percent of entry: never so wide R dwarfs the move
     # Fix 4: Order expiry for stale pending signals
     order_expiry_hours: int = 6
     # Cap on the post-T1 hunting leg. A symbol that stops returning candles
     # (delisting, API gap) used to leave its signal in ACTIVE_T2 forever —
     # invisible to every closed-trade stat while still "holding" capital.
-    t2_expiry_hours: int = 48
-
 
     # ── Exit management ──────────────────────────────────────────────────────
     # Break-even arming, in R: the stop moves to entry once the trade has earned
     # this much of its own risk back. This replaces a flat `mfe >= 2.5` PERCENT,
     # which on a 5% stop armed at 0.5R and converted eight of the first 22 closed
     # trades into break-evens.
-    be_arm_r: float = 1.0
+    # Recalibrated on the live cohort: median MFE is 0.37R, so a 1.0R arming
+    # threshold NEVER fired (0 break-evens from the mechanism that exists to
+    # create them). 0.45R arms on ~39% of trades — just above the median —
+    # converting the deep-dip cohort (MAE p75 0.76R) into flat exits instead
+    # of full losses.
+    be_arm_r: float = 0.45
+
+    # Runner leg. The old 5% extension on a 0.25R bank leg needed a ~5R move
+    # the distribution flatly does not contain (MFE p90 1.12R). 2.5% keeps the
+    # runner meaningful while staying inside the observed tail.
+    target2_extension_pct: float = 2.5
+
+    # Runner time stop: a runner that hasn't paid for itself inside 24h is
+    # dead capital — close it (stop is at/beyond entry by then via BE arm, so
+    # the time-stop exit is ~flat, not a loss). Frees the slot for the next
+    # signal instead of parking 40% of the position for 48h.
+    t2_expiry_hours: int = 24
 
 
 class AlertConfig(BaseModel):
