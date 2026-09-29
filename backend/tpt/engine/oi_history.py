@@ -150,8 +150,15 @@ async def get_baseline(underlying: str, now: float | None = None) -> dict[str, A
 
 async def compute_oi_flow(
     underlying: str, board: list[dict], top_n: int = 3,
+    expiry_filter: str | None = None,
 ) -> dict[str, Any] | None:
-    """24h change in positioning: totals + biggest per-strike OI moves."""
+    """24h change in positioning: totals + biggest per-strike OI moves.
+
+    Band-filtered boards (0DTE/7D/30D) return None: stored snapshots are
+    whole-chain, so band-vs-chain deltas fabricate flows (every 0DTE
+    settlement would book as a giant outflow against the ALL baseline)."""
+    if expiry_filter and str(expiry_filter).upper() not in ("", "ALL"):
+        return None
     baseline = await get_baseline(underlying)
     if baseline is None:
         return None

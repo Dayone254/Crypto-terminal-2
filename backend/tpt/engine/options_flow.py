@@ -22,6 +22,35 @@ from tpt.engine.vol_surface import build_surfaces_from_board, get_iv_from_surfac
 
 logger = logging.getLogger("tpt.engine.options_flow")
 
+# ---------------------------------------------------------------------------
+# Expiry-bucket payload cache (0DTE / 7D / 30D tabs).
+# The WS route recomputes once per second per client; without a TTL cache a
+# handful of tabs multiply into full GEX engine runs (greeks batch + SABR +
+# analytics) many times per second. The ws_memory ALL-board cache does not
+# apply here because it only ever holds unfiltered payloads.
+# ---------------------------------------------------------------------------
+_EXPIRY_BUCKET_FILTERS = ("0DTE", "7D", "30D")
+_EXPIRY_BUCKET_TTL_SECONDS = 15.0
+_EXPIRY_BUCKET_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_EXPIRY_BUCKET_CACHE_MAX = 64
+
+
+def _filtered_cache_key(underlying: str, expiry_filter: str) -> str | None:
+    """Cache key for fixed DTE bands; None = payload must not be cached."""
+    f = (expiry_filter or "").strip().upper()
+    if f in _EXPIRY_BUCKET_FILTERS:
+        return f"{(underlying or "").upper()}:{f}"
+    return None
+
+
+def _bucket_cache_put(key: str | None, payload: dict[str, Any]) -> None:
+    if key is None:
+        return
+    if len(_EXPIRY_BUCKET_CACHE) >= _EXPIRY_BUCKET_CACHE_MAX:
+        _EXPIRY_BUCKET_CACHE.pop(next(iter(_EXPIRY_BUCKET_CACHE)), None)
+    _EXPIRY_BUCKET_CACHE[key] = (time.time(), payload)
+
+
 def parse_expiry(expiry_str: Any) -> float:
     """
     Parses expiry inputs ('27SEP24', '240927', '20240927', or unix timestamp in seconds/ms)
@@ -98,6 +127,12 @@ async def calculate_macro_gamma_exposure(
     charts). Default is strict: no board → honest "unavailable" payload.
     """
     try:
+        cache_key = _filtered_cache_key(underlying, expiry_filter)
+        if cache_key is not None:
+            ts_cached, cached_payload = _EXPIRY_BUCKET_CACHE.get(cache_key, (0.0, None))
+            if cached_payload is not None and (time.time() - ts_cached) < _EXPIRY_BUCKET_TTL_SECONDS:
+                return cached_payload
+
         board, venue_metrics = await aggregate_multi_venue_options_board(underlying)
         
         # Strict underlying asset validation first — cheap, deterministic, and
@@ -250,6 +285,11 @@ async def calculate_macro_gamma_exposure(
                 newItem["_dte"] = dte_val
                 board_with_dte.append(newItem)
 
+            # NOTE: no cross-band fallbacks. Earlier revisions widened an
+            # empty 7D slice to 14d and an empty 30D slice to 60d, which
+            # silently served the wrong term structure under the tab's
+            # label. Each band shows exactly its own contracts, or the
+            # honest empty payload below.
             if filter_upper == "0DTE":
                 # Strict 0DTE: ≤ 1 calendar day.
                 # No fallback — if no same-day contracts exist (e.g. BTC expires weekly
@@ -259,27 +299,32 @@ async def calculate_macro_gamma_exposure(
             elif filter_upper == "7D":
                 # 7D bucket: exclusive of 0DTE, up to 8 days
                 filtered = [x for x in board_with_dte if 1.0 < float(x["_dte"]) <= 8.0]
-                if not filtered:
-                    filtered = [x for x in board_with_dte if 0 < float(x["_dte"]) <= 14.0]
             elif filter_upper == "30D":
                 # 30D bucket: exclusive of 7D and 0DTE, up to 35 days
                 filtered = [x for x in board_with_dte if 8.0 < float(x["_dte"]) <= 35.0]
-                if not filtered:
-                    filtered = [x for x in board_with_dte if 0 < float(x["_dte"]) <= 60.0]
             else:
                 filtered = board_with_dte
 
             if filtered:
                 board = filtered
-            elif filter_upper == "0DTE":
-                # No same-day contracts available — signal empty rather than fall back
-                return {
+            elif filter_upper in _EXPIRY_BUCKET_FILTERS:
+                # No contracts in this band: signal empty rather than quietly
+                # serve the whole board under a 0DTE/7D/30D label.
+                dtes = [float(x["_dte"]) for x in board_with_dte if float(x["_dte"]) > 0]
+                coverage = (
+                    f"chain spans {min(dtes):.1f}-{max(dtes):.1f} days to expiry"
+                    if dtes else "chain is empty"
+                )
+                empty_payload = {
                     "underlying": underlying,
                     "expiry_filter": expiry_filter,
                     "expiry_available": False,
+                    "options_available": False,
                     "spot_price": spot_price,
-                    "message": f"No 0DTE contracts available for {underlying} (next expiry is further out).",
+                    "message": f"No {filter_upper} contracts available for {underlying} ({coverage}).",
                 }
+                _bucket_cache_put(cache_key, empty_payload)
+                return empty_payload
 
         # Per-strike accumulators
         strike_net_gex:  dict[float, float] = {}
@@ -603,7 +648,12 @@ async def calculate_macro_gamma_exposure(
             analytics = {}
 
         try:
-            oi_flow = await compute_oi_flow(underlying, board)
+            # Band-filtered boards return None: stored snapshots are
+            # whole-chain, so band-vs-chain deltas fabricate flows.
+            oi_flow = await compute_oi_flow(
+                underlying, board,
+                expiry_filter=None if filter_upper == "ALL" else filter_upper,
+            )
         except Exception as of_err2:
             logger.warning("OI flow computation failed for %s: %s", underlying, of_err2)
             oi_flow = None
@@ -634,7 +684,7 @@ async def calculate_macro_gamma_exposure(
             f"regime={'LONG' if total_gex >= 0 else 'SHORT'}_GAMMA"
         )
 
-        return {
+        payload = {
             "underlying":                underlying,
             "expiry_filter":             expiry_filter,
             "options_available":         True,
@@ -666,9 +716,33 @@ async def calculate_macro_gamma_exposure(
             "venue_metrics":             venue_metrics,
             "orderflow":                 orderflow,
         }
+        _bucket_cache_put(cache_key, payload)
+        return payload
 
     except Exception as e:
         logger.error(f"Error calculating macro gamma exposure: {e}")
         logger.error(traceback.format_exc())
         return {}
+
+
+async def calculate_filtered_gamma_exposure(
+    underlying: str, expiry_filter: str,
+) -> dict[str, Any] | None:
+    """Expiry-bucket GEX payload (0DTE / 7D / 30D) with TTL caching.
+
+    Returns None only when the filter is not a fixed DTE band (caller should
+    fall back to the ALL-board cache) or the engine errored. Honest empty
+    results (expiry_available=False) are returned as-is, cached briefly."""
+    u = (underlying or "").strip().upper()
+    f = (expiry_filter or "").strip().upper()
+    if not u or f not in _EXPIRY_BUCKET_FILTERS:
+        return None
+    try:
+        res = await calculate_macro_gamma_exposure(
+            u, 0.0, expiry_filter=f, allow_synthetic=(u in ("BTC", "ETH")),
+        )
+    except Exception:
+        logger.exception("Filtered gamma exposure failed for %s (%s)", u, f)
+        return None
+    return res or None
 

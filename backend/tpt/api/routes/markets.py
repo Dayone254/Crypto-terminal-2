@@ -12,6 +12,7 @@ from tpt.db.connection import AsyncSessionLocal
 from tpt.db.queries import get_latest_ladder_and_score
 from tpt.engine.belief import coverage_band
 from tpt.engine.ladder import format_ladder_text, sanitize_ladder_dict
+from tpt.engine.options_flow import calculate_filtered_gamma_exposure
 
 router = APIRouter()
 
@@ -23,8 +24,10 @@ _MARKETS_CACHE_TS: float = 0.0
 _MARKETS_CACHE_TTL: float = 15.0  # 15 seconds RAM cache
 
 # Per-symbol detail cache — avoids cold DB reads on every 5s poll from the asset page.
-_DETAIL_CACHE: dict[str, dict[str, Any]] = {}
-_DETAIL_CACHE_TS: dict[str, float] = {}
+# Keyed by (symbol, expiry): a 0DTE/7D/30D detail request must never be served
+# the ALL-board options_flow cached for a sibling request.
+_DETAIL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_DETAIL_CACHE_TS: dict[tuple[str, str], float] = {}
 _DETAIL_CACHE_TTL: float = 30.0  # 30 seconds
 
 @router.get("/markets", response_model=list[dict[str, Any]])
@@ -270,11 +273,13 @@ async def get_rs_matrix() -> dict[str, Any]:
 async def get_market_detail(product_id: str, expiry: str = "ALL") -> dict[str, Any]:
     """Return latest setup quality, score, label, ladder, and options flow for a given symbol."""
     pid_upper = product_id.upper()
+    expiry_upper = (expiry or "ALL").upper()
     now = time.time()
 
-    # Serve from RAM cache if fresh (avoids cold DB read on every 5-20s poll).
-    cached = _DETAIL_CACHE.get(pid_upper)
-    if cached and (now - _DETAIL_CACHE_TS.get(pid_upper, 0.0)) < _DETAIL_CACHE_TTL:
+    # Serve from RAM cache if fresh (avoids cold DB read on every 5s poll).
+    cache_key = (pid_upper, expiry_upper)
+    cached = _DETAIL_CACHE.get(cache_key)
+    if cached and (now - _DETAIL_CACHE_TS.get(cache_key, 0.0)) < _DETAIL_CACHE_TTL:
         return cached
 
     async with AsyncSessionLocal() as db:
@@ -286,15 +291,29 @@ async def get_market_detail(product_id: str, expiry: str = "ALL") -> dict[str, A
         underlying = pid_upper.split("-")[0]
 
         cached_options = ws_memory.get_macro_options(underlying)
-        if cached_options and isinstance(cached_options, dict) and cached_options.get("underlying", "").upper() == underlying:
+        if (
+            expiry_upper == "ALL"
+            and cached_options
+            and isinstance(cached_options, dict)
+            and cached_options.get("underlying", "").upper() == underlying
+        ):
             data["options_flow"] = cached_options
         else:
-            # Do NOT block the HTTP response — return None immediately.
-            # Frontend receives live GEX via WebSocket (/api/v1/ws/options/{symbol}).
-            data["options_flow"] = None
+            # Specific expiry bucket: compute the filtered board directly — the
+            # ws_memory cache is always the unfiltered ALL board and would show
+            # wrong-expiry walls. Falls back to the ALL cache only when the
+            # filtered recompute yields nothing. Expiry-scoped payloads are
+            # never written back to the shared cache, so they cannot poison it.
+            filtered = await calculate_filtered_gamma_exposure(underlying, expiry_upper)
+            if filtered is not None:
+                data["options_flow"] = filtered
+            elif cached_options and isinstance(cached_options, dict) and cached_options.get("underlying", "").upper() == underlying:
+                data["options_flow"] = cached_options
+            else:
+                data["options_flow"] = None
 
-        _DETAIL_CACHE[pid_upper] = data
-        _DETAIL_CACHE_TS[pid_upper] = now
+        _DETAIL_CACHE[cache_key] = data
+        _DETAIL_CACHE_TS[cache_key] = now
         return data
 
 

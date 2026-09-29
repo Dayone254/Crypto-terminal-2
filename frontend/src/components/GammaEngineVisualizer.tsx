@@ -154,10 +154,16 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                     const json = await res.json();
                     if (isMounted && json && json.options_flow) {
                         const of = json.options_flow;
-                        // Handle no-0DTE signal
+                        // Handle empty-expiry-band signal (0DTE / 7D / 30D with no contracts)
                         if (of.expiry_available === false) {
-                            setNo0dte(of.message || `No 0DTE contracts available for ${baseCoin} today.`);
+                            setNo0dte(of.message || `No ${expiryFilter} contracts available for ${baseCoin}.`);
                             setData(null);
+                            return;
+                        }
+                        // Expiry-echo guard: never paint a payload computed
+                        // for a different band than the selected tab.
+                        const resExp = (of.expiry_filter || "ALL").toUpperCase();
+                        if (resExp !== expiryFilter.toUpperCase()) {
                             return;
                         }
                         setNo0dte(null);
@@ -186,9 +192,9 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                 try {
                     const payload = JSON.parse(event.data);
                     if (payload && isMounted && payload.underlying && payload.underlying.toUpperCase() === baseCoin) {
-                        // Handle no-0DTE signal from backend
+                        // Handle empty-expiry-band signal from backend
                         if (payload.expiry_available === false) {
-                            setNo0dte(payload.message || `No 0DTE contracts available for ${baseCoin} today.`);
+                            setNo0dte(payload.message || `No ${expiryFilter} contracts available for ${baseCoin}.`);
                             setData(null);
                             return;
                         }
@@ -254,12 +260,15 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
 
     // Freshness: gamma levels only refresh with the options board (~15-30s
     // venue cache) while the spot ticker ticks every 2s — label data age
-    // honestly instead of always claiming LIVE REAL-TIME.
+    // honestly instead of always claiming LIVE REAL-TIME. Expiry buckets are
+    // TTL-cached server-side at 15s, so a bucket view older than ~45s is
+    // genuinely stale even though the ALL view legitimately lives longer.
+    const staleAfterSec = expiryFilter === "ALL" ? 120 : 45;
     const dataAgeSec = hasData && data?.computed_at
         ? Math.max(0, Math.floor(Date.now() / 1000 - data.computed_at))
         : null;
     const dataStatus: "OFFLINE" | "STALE" | "LIVE" =
-        !hasData ? "OFFLINE" : dataAgeSec === null || dataAgeSec > 120 ? "STALE" : "LIVE";
+        !hasData ? "OFFLINE" : dataAgeSec === null || dataAgeSec > staleAfterSec ? "STALE" : "LIVE";
 
     const sortedStrikes = [...gexCurve].sort((a, b) => b.strike - a.strike);
 
@@ -372,6 +381,15 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                                 );
                             })}
                         </div>
+                        <span style={{ fontSize: "0.58rem", fontWeight: 700, color: "#475569" }}>
+                            {expiryFilter === "ALL"
+                                ? "ENTIRE CHAIN"
+                                : expiryFilter === "0DTE"
+                                    ? "≤ 1 DAY"
+                                    : expiryFilter === "7D"
+                                        ? "1–8 DAYS"
+                                        : "8–35 DAYS"}
+                        </span>
                     </div>
 
                     <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem" }}>
@@ -453,7 +471,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
             </div>
 
             {/* ─── NO 0DTE AVAILABILITY BANNER ──────────────────────────────── */}
-            {no0dte && expiryFilter === "0DTE" && (
+            {no0dte && expiryFilter !== "ALL" && (
                 <div style={{
                     padding: "0.55rem 0.85rem",
                     background: "rgba(245, 158, 11, 0.08)",
@@ -466,7 +484,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                     color: "#f59e0b",
                 }}>
                     <span style={{ fontSize: "0.85rem" }}>⚠</span>
-                    <span><strong>No 0DTE contracts today.</strong> {baseCoin} options expire weekly (Fridays at 08:00 UTC). {no0dte}</span>
+                    <span><strong>No {expiryFilter} contracts today.</strong> {no0dte}</span>
                 </div>
             )}
 

@@ -45,9 +45,17 @@ async def options_flow_stream(websocket: WebSocket, product_id: str, expiry: str
                     # If not cached yet or expiry filter is active, compute exposure.
                     # Majors keep the legacy synthetic-board fallback; every other
                     # underlying gets an honest "no options market" payload.
-                    from tpt.engine.options_flow import calculate_macro_gamma_exposure
-                    allow_synth = underlying in ("BTC", "ETH")
-                    options_data = await calculate_macro_gamma_exposure(underlying, 0.0, expiry_filter=expiry, allow_synthetic=allow_synth)
+                    from tpt.engine.options_flow import (
+                        calculate_filtered_gamma_exposure,
+                        calculate_macro_gamma_exposure,
+                    )
+                    if expiry.upper() in ("0DTE", "7D", "30D"):
+                        # TTL-cached bucket compute: a bare loop here would
+                        # re-run the full GEX engine every second per client.
+                        options_data = await calculate_filtered_gamma_exposure(underlying, expiry)
+                    else:
+                        allow_synth = underlying in ("BTC", "ETH")
+                        options_data = await calculate_macro_gamma_exposure(underlying, 0.0, expiry_filter=expiry, allow_synthetic=allow_synth)
                     if options_data and expiry.upper() == "ALL":
                         ws_memory.macro_options_cache[underlying] = options_data
 
