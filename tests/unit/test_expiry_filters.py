@@ -37,13 +37,17 @@ def _contract(strike, ctype, expiry_str, oi=50.0):
 def _near_expiry(days_ahead):
     """A Deribit-style expiry string days_ahead days out, settling 08:00 UTC.
 
-    The near leg rolls to tomorrow when today's 08:00 settlement has already
-    passed (or is imminent), so the 0DTE bucket always has dte in (0, 1]."""
+    The near leg rolls to tomorrow only AFTER today's 08:00 settlement has
+    actually passed. Rolling early (the old 5-minute margin) pushed the
+    same-day contract's dte to ~1.005 — outside the 0DTE band's strict
+    `<= 1.0` filter (empty band) and inside the 7D band (mis-bucketed), so
+    this suite failed for ~72 minutes around every settlement boundary
+    depending on when it ran."""
     import datetime as dt
 
     now = dt.datetime.now(dt.UTC)
     exp = now.replace(hour=8, minute=0, second=0, microsecond=0) + dt.timedelta(days=days_ahead)
-    if days_ahead == 0 and exp <= now + dt.timedelta(minutes=5):
+    if days_ahead == 0 and exp <= now:
         exp += dt.timedelta(days=1)
     return exp.strftime("%d%b%y").upper()
 
@@ -102,7 +106,13 @@ async def test_0dte_selects_only_same_day_expiry(monkeypatch):
     expiries = {c["expiry"] for c in res["expiry_clusters"] if c["expiry"] != "_0DTE_SHARE"}
     assert len(expiries) == 1
     cluster = next(c for c in res["expiry_clusters"] if c["expiry"] != "_0DTE_SHARE")
-    assert 0.0 < cluster["dte"] <= 1.0
+    # dte arrives rounded to 1 decimal, and parse_expiry pins dated expiries to
+    # 08:00 UTC settlement: late in the UTC morning a same-day expiry rounds to
+    # 0.0 (that is what 0DTE means), and just before 07:55 the roll guard puts
+    # the raw dte a hair over 1.0 (rounding back to exactly 1.0). Assert the
+    # real invariant — a same-day settlement, never negative — on the rounded
+    # value; the engine's own band filter is unrounded and stays strict.
+    assert 0.0 <= cluster["dte"] <= 1.0
 
 
 @pytest.mark.asyncio

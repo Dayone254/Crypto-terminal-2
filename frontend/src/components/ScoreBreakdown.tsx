@@ -1,7 +1,8 @@
 "use client";
 
 import React from "react";
-import { ScoreBreakdown as Breakdown } from "@/lib/api";
+import { CalendarClock, CalendarDays, CalendarRange } from "lucide-react";
+import { ScoreBreakdown as Breakdown, TimeframeContext } from "@/lib/api";
 
 /**
  * "Why is this score what it is" — the scorer's own arithmetic, rendered.
@@ -58,6 +59,14 @@ const INTERACTION_LABELS: Record<string, string> = {
     call_skew_greed_bonus: "Call skew (greed)",
     call_skew_greed_penalty: "Call skew (greed) · short headwind",
     macro_beta_headwind: "Macro BTC headwind",
+};
+
+/** 4h/1d/1w/1M close pre-check — display metadata per timeframe key. */
+const TF_META: Record<string, { label: string; Icon: React.ComponentType<any> }> = {
+    "4h": { label: "4H", Icon: CalendarClock },
+    "1d": { label: "1D", Icon: CalendarDays },
+    "1w": { label: "1W", Icon: CalendarRange },
+    "1M": { label: "1M", Icon: CalendarRange },
 };
 
 const POS = "var(--pos-bright)";
@@ -119,6 +128,10 @@ export function ScoreBreakdownPanel({
     const interactions = breakdown.interactions ?? 0;
     const weightedPoints = clamped - baseline - interactions;
     const coverage = breakdown.coverage;
+    // Multi-timeframe close pre-check evidence (4h/1d/1w/1M), persisted with
+    // the score. Evidence-only: it frames what the setup is fighting or
+    // riding, it does not move the number.
+    const tfCtx: TimeframeContext | undefined = breakdown?.timeframes;
 
     // The weighted components, in the order the active direction defines them.
     const weightMap = weights ?? {};
@@ -206,6 +219,49 @@ export function ScoreBreakdownPanel({
                             </div>
                         );
                     })}
+                </div>
+            )}
+
+            {/* Multi-timeframe close pre-check — what the higher-timeframe candles are doing */}
+            {tfCtx?.tfs && Object.keys(tfCtx.tfs).length > 0 && (
+                <div style={{ borderTop: "1px solid var(--line)", paddingTop: "0.75rem", marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "0.3rem" }}>
+                        <span style={{ fontSize: "0.6rem", color: "var(--text-4)", fontWeight: 700 }}>HIGHER-TIMEFRAME CLOSES</span>
+                        <span className="mono" style={{ fontSize: "0.58rem", color: "var(--text-dim)" }}>
+                            {tfCtx.aligned_long || tfCtx.aligned_short
+                                ? `${tfCtx.aligned_long ? `${tfCtx.aligned_long}↑` : ""}${tfCtx.aligned_long && tfCtx.aligned_short ? " · " : ""}${tfCtx.aligned_short ? `${tfCtx.aligned_short}↓` : ""} settled streaks`
+                                : "no settled streaks"}
+                        </span>
+                    </div>
+                    {Object.entries(tfCtx.tfs).map(([tf, s]) => {
+                        const meta = TF_META[tf] ?? { label: tf.toUpperCase(), Icon: CalendarDays };
+                        const Icon = meta.Icon;
+                        const cvo = s.close_vs_open_pct;
+                        const streak = s.streak ?? 0;
+                        const bias = cvo == null ? null : cvo > 0.05 ? "UP" : cvo < -0.05 ? "DOWN" : "FLAT";
+                        const biasColor = bias === "UP" ? POS : bias === "DOWN" ? NEG : ABSENT;
+                        return (
+                            <div key={tf} style={{ display: "grid", gridTemplateColumns: "58px 1fr auto", gap: "0.5rem", alignItems: "center", fontSize: "0.65rem" }}>
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", color: "var(--text-3)", fontWeight: 600 }}>
+                                    <Icon size={11} color={streak > 0 ? POS : streak < 0 ? NEG : "var(--text-dim)"} />
+                                    {meta.label}
+                                </span>
+                                <span style={{ color: "var(--text-muted)", lineHeight: 1.35 }}>
+                                    {s.forming ? "forming · " : "closed · "}
+                                    {cvo != null ? `${cvo >= 0 ? "+" : ""}${cvo.toFixed(2)}%` : "n/a"}
+                                    {s.range_pct != null ? ` · range ${s.range_pct.toFixed(1)}%` : ""}
+                                    {s.days_elapsed != null && s.month_total_days != null ? ` · day ${s.days_elapsed + 1}/${s.month_total_days}` : ""}
+                                    {streak !== 0 ? ` · ${Math.abs(streak)}${streak > 0 ? "↑" : "↓"} closed` : ""}
+                                </span>
+                                <span className="mono" style={{ fontSize: "0.6rem", fontWeight: 800, color: biasColor }}>{bias ?? "—"}</span>
+                            </div>
+                        );
+                    })}
+                    {Object.values(tfCtx.tfs).some((s) => s.note) && (
+                        <span style={{ fontSize: "0.6rem", color: "var(--text-dim)", lineHeight: 1.4 }}>
+                            {Object.values(tfCtx.tfs).find((s) => s.note)?.note}
+                        </span>
+                    )}
                 </div>
             )}
 

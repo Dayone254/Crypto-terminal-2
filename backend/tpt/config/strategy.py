@@ -170,12 +170,35 @@ class GammaConfig(BaseModel):
     min_confidence_score: int = 50
 
 
+class TimeframeConfig(BaseModel):
+    """Multi-timeframe close pre-check (4h / 1d / 1w / 1M).
+
+    The context itself is ALWAYS computed and recorded on candidates and
+    score_breakdown — evidence is free, and the operator's rule of thumb is
+    that higher-timeframe closes frame the bias for everything under them
+    (month -> week -> day). The veto, however, stays OFF until the ledger
+    shows that standing down against aligned higher-timeframe streaks
+    actually improves outcomes. Same evidence-before-gating discipline as
+    the gamma suppressors."""
+    # Record-only when False; when True, ENTRY_ZONE/COILED setups whose
+    # direction runs against `min_veto_timeframes`+ settled higher-timeframe
+    # close streaks are flipped to SKIP before the label is set.
+    veto_enabled: bool = False
+    # A timeframe counts as hostile when its settled close streak (completed
+    # bars only — a forming bar can still un-form) runs >= this many bars
+    # against the trade direction.
+    min_veto_streak: int = 2
+    # How many timeframes must be hostile at once before a direction stands down.
+    min_veto_timeframes: int = 2
+
+
 class StrategyConfig(BaseModel):
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     labeling: LabelingConfig = Field(default_factory=LabelingConfig)
     ladder: LadderConfig = Field(default_factory=LadderConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     gamma: GammaConfig = Field(default_factory=GammaConfig)
+    timeframes: TimeframeConfig = Field(default_factory=TimeframeConfig)
 
 
 _cached_config: StrategyConfig | None = None

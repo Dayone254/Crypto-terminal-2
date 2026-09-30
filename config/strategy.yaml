@@ -80,6 +80,19 @@ ladder:
   # once the trade has earned its own risk back. Raise to let winners breathe.
   be_arm_r: 1.0
 
+# Multi-timeframe close pre-check (4h / 1d / 1w / 1M).
+# The close context is always computed and recorded on every candidate and
+# score breakdown - higher-timeframe closes frame the bias for everything
+# under them (month -> week -> day). veto_enabled stays False until the
+# ledger shows standing down against aligned higher-timeframe streaks
+# improves outcomes; when True, an actionable setup whose direction runs
+# against min_veto_timeframes+ settled streaks (>= min_veto_streak
+# completed bars) is flipped to SKIP before it can become a trade.
+timeframes:
+  veto_enabled: false
+  min_veto_streak: 2
+  min_veto_timeframes: 2
+
 alerts:
   dedupe_hours: 6
   quiet_hours_start: "00:00"

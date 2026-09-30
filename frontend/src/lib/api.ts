@@ -50,6 +50,8 @@ export interface CandidateRow {
     ladder: LadderLevels | null;
     tags: string[];
     pinned: boolean;
+    /** Multi-timeframe close pre-check evidence, when candles were available this scan. */
+    timeframes?: TimeframeContext;
 }
 
 export interface LadderLevels {
@@ -123,6 +125,34 @@ export interface ScoreBreakdown {
     funding_rate?: number | null;
     oi_change_pct?: number | null;
     tags?: string[];
+    /** Multi-timeframe close pre-check evidence (4h/1d/1w/1M), recorded per scan. */
+    timeframes?: TimeframeContext;
+}
+
+/** One timeframe's current (forming) candle close state, as the scanner read it. */
+export interface TFCloseStats {
+    bars?: number;
+    forming?: boolean;
+    open?: number;
+    close?: number;
+    high?: number;
+    low?: number;
+    close_vs_open_pct?: number | null;
+    pos_in_range?: number | null;
+    range_pct?: number | null;
+    /** Signed consecutive-close count over COMPLETED bars; the forming bar never votes. */
+    streak?: number;
+    days_elapsed?: number;
+    month_total_days?: number;
+    note?: string;
+}
+
+/** 4h/1d/1w/1M close context attached to each score by the scanner. */
+export interface TimeframeContext {
+    tfs?: Record<string, TFCloseStats>;
+    aligned_long?: number;
+    aligned_short?: number;
+    n_timeframes?: number;
 }
 
 /**

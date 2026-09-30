@@ -416,7 +416,7 @@ async def _execute_scan(
             # entire candle pipeline for the symbol.
             results = await asyncio.gather(
                 adapter.get_candles(pid, granularity=3600, limit=300),
-                adapter.get_candles(pid, granularity=86400, limit=30),
+                adapter.get_candles(pid, granularity=86400, limit=95),
                 adapter.get_candles_15m(pid, limit=50),
                 adapter.get_candles_6h(pid, limit=60),
                 return_exceptions=True,
@@ -543,6 +543,27 @@ async def _execute_scan(
             trade_direction, score_dict = _pick_direction(feats, cfg, current_regime, beta_thrust)
             comp_score = score_dict["clamped"]
 
+            # --- Multi-timeframe close pre-check (4h / 1d / 1w / 1M) ---
+            # The operator's first look before any trade: what are the
+            # higher-timeframe candles actually doing? A monthly close in
+            # particular frames the bias for everything under it. Derived
+            # from candle data the scan already bought (4h aggregated from
+            # 1h, weekly/monthly from the widened dailies) — no new venue
+            # calls. Recorded on the candidate and score_breakdown for the
+            # UI and ledger; the streak veto stays config-gated OFF until
+            # the ledger proves standing down improves outcomes.
+            tf_ctx = None
+            try:
+                from tpt.engine.timeframe_context import (
+                    build_timeframe_context,
+                    evaluate_timeframe_veto,
+                )
+                tf_ctx = build_timeframe_context(c1h, c1d)
+            except Exception as tf_exc:
+                logger.debug("Timeframe close context unavailable for %s: %s", pid, tf_exc)
+            if tf_ctx is not None:
+                score_dict["timeframes"] = tf_ctx
+
             # --- Order-book / futures / options enrichment (triage-selected) ---
             if pid in enrich_set:
                 try:
@@ -593,6 +614,25 @@ async def _execute_scan(
 
             if score_dict.get("veto"):
                 primary_label = "SKIP"
+            elif tf_ctx is not None and cfg.timeframes.veto_enabled:
+                # The actual pre-check gate: a direction that runs against
+                # min_veto_timeframes+ settled higher-timeframe close streaks
+                # is stood down BEFORE the label can make it a trade.
+                tf_veto = evaluate_timeframe_veto(
+                    tf_ctx,
+                    trade_direction,
+                    min_streak=cfg.timeframes.min_veto_streak,
+                    min_timeframes=cfg.timeframes.min_veto_timeframes,
+                )
+                if tf_veto:
+                    score_dict["timeframe_veto"] = tf_veto
+                    primary_label = "SKIP"
+                else:
+                    primary_label = label(
+                        feats, comp_score, cfg.labeling,
+                        trade_direction=trade_direction,
+                        regime=current_regime,
+                    )
             else:
                 primary_label = label(
                     feats, comp_score, cfg.labeling,
@@ -739,6 +779,7 @@ async def _execute_scan(
                 "label": primary_label,
                 "tags": tags,
                 "gamma": gamma_ctx,
+                "timeframes": tf_ctx,
                 "ladder": ladder_dict,
                 "pinned": pinned,
             })
