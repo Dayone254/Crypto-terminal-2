@@ -154,7 +154,7 @@ async def _resolve_same_candle_collision(
 async def process_signals():
     """Evaluate all PENDING signals against real price action."""
     async with get_connection() as conn, conn.execute(
-        "SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2')"
+        "SELECT * FROM signals WHERE status IN ('PENDING', 'IN_TRADE', 'ACTIVE_T2')"
     ) as cur:
         signals = await cur.fetchall()
 
@@ -170,6 +170,9 @@ async def process_signals():
         be_arm_r = 1.0
 
     updates: list[tuple] = []
+    # Rows promoted PENDING -> IN_TRADE this pass. A plain id list: the
+    # promotion is a guarded status flip, not an outcome write.
+    in_trade_promotions: list[int] = []
 
     async with httpx.AsyncClient() as client:
         for sig in signals:
@@ -404,6 +407,14 @@ async def process_signals():
 
                 # Collect update once per signal — AFTER the candle loop completes (not inside it)
                 updates.append((status, mfe, mae, closed_at, filled_at, fill_price, partial_exit_at, partial_exit_price, final_status, current_trail_sl, sig["id"]))
+
+                # Lifecycle promotion: filled but not closed means IN_TRADE,
+                # not PENDING. PENDING stays reserved for waiting limit
+                # orders — which is what the UI's 'PENDING (Tagged)' tab has
+                # always claimed to show. ACTIVE_T2 and closed outcomes pass
+                # through unchanged.
+                if already_filled and not closed_at and status == "PENDING":
+                    in_trade_promotions.append(sig["id"])
             except Exception as exc:
                 logger.error("Error evaluating signal %d: %s", sig.get("id"), exc)
                     
@@ -419,6 +430,24 @@ async def process_signals():
                            partial_exit_at=?, partial_exit_price=?, final_status=?, trail_sl=?
                        WHERE id=?""",
                 updates
+            )
+            await conn.commit()
+
+    # Lifecycle promotions LAST: the guarded status flip must run after the
+    # outcome executemany above, otherwise that write (which still carries
+    # the stale status read at the top of this pass) would flip a promoted
+    # row straight back to PENDING. The WHERE clause re-checks the
+    # preconditions so a concurrent transition committed between the read
+    # and this write can never be clobbered either.
+    if in_trade_promotions:
+        from tpt.db.write_lock import db_write_lock
+        ph = ",".join("?" for _ in in_trade_promotions)
+        async with db_write_lock, get_connection() as conn:
+            await conn.execute(
+                "UPDATE signals SET status='IN_TRADE' "
+                "WHERE status='PENDING' AND filled_at IS NOT NULL "
+                "AND closed_at IS NULL AND id IN (" + ph + ")",
+                in_trade_promotions,
             )
             await conn.commit()
 

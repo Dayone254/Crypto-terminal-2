@@ -54,7 +54,7 @@ interface Stats {
 interface Trade {
     id: number; symbol: string; timestamp: number; score: number;
     label: string; entry_price: number; tp_price: number; sl_price: number;
-    status: "WIN" | "LOSS" | "PENDING" | "PARTIAL_WIN" | "BREAK_EVEN" | "ACTIVE_T2" | "EXPIRED" | "L2_REJECTED"; mfe: number; mae: number;
+    status: "WIN" | "LOSS" | "PENDING" | "IN_TRADE" | "PARTIAL_WIN" | "BREAK_EVEN" | "ACTIVE_T2" | "EXPIRED" | "L2_REJECTED"; mfe: number; mae: number;
     closed_at: number | null; filled_at: number | null; fill_price: number | null;
 }
 
@@ -74,6 +74,7 @@ const statusStyle = (status: string, filled: boolean): React.CSSProperties => ({
     LOSS: { color: "var(--neg)", background: "rgba(244,63,94,0.12)", border: "none" },
     BREAK_EVEN: { color: "var(--text-3)", background: "rgba(148,163,184,0.12)", border: "none" },
     ACTIVE_T2: { color: "var(--accent-blue)", background: "rgba(59,130,246,0.12)", border: "none" },
+    IN_TRADE: { color: "var(--warn)", background: "rgba(245,158,11,0.18)", border: "1px solid rgba(245,158,11,0.4)" },
     EXPIRED: { color: "var(--text-dim)", background: "rgba(100,116,139,0.15)", border: "none" },
     L2_REJECTED: { color: "#f87171", background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.3)" },
     // PENDING splits into WAITING (no fill) vs IN TRADE (filled, hunting T1)
@@ -85,6 +86,7 @@ const statusStyle = (status: string, filled: boolean): React.CSSProperties => ({
 const statusLabel = (status: string, filled: boolean): string => ({
     WIN: "WIN ✓", PARTIAL_WIN: "PARTIAL WIN", LOSS: "LOSS ✗",
     BREAK_EVEN: "BREAK EVEN", ACTIVE_T2: "ACTIVE T2 →",
+    IN_TRADE: "IN TRADE ▶",
     EXPIRED: "EXPIRED ⌛", L2_REJECTED: "L2 REJECTED ⛔",
     PENDING: filled ? "IN TRADE ▶" : "WAITING",
 }[status] ?? status);
@@ -340,7 +342,8 @@ export default function EdgePage() {
                         <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
                             {[
                                 { id: "ALL", label: "ALL" },
-                                { id: "PENDING", label: "PENDING (Tagged)" },
+                                { id: "IN_TRADE", label: "IN TRADE" },
+                                { id: "PENDING", label: "WAITING" },
                                 { id: "ACTIVE_T2", label: "ACTIVE T2" },
                                 { id: "WIN", label: "WIN" },
                                 { id: "PARTIAL_WIN", label: "PARTIAL_WIN" },

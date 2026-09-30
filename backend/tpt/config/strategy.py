@@ -161,11 +161,21 @@ class AlertConfig(BaseModel):
     digest_time: str = "08:00"
 
 
+class GammaConfig(BaseModel):
+    """Dealer-gamma context on the scanner. Tags are always recorded;
+    suppression stays off until the v3.1-gamma-* shadow cohorts prove the
+    families' edge in the ledger."""
+    suppress_fades_in_short_gamma: bool = False
+    suppress_breakouts_into_call_wall: bool = False
+    min_confidence_score: int = 50
+
+
 class StrategyConfig(BaseModel):
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     labeling: LabelingConfig = Field(default_factory=LabelingConfig)
     ladder: LadderConfig = Field(default_factory=LadderConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
+    gamma: GammaConfig = Field(default_factory=GammaConfig)
 
 
 _cached_config: StrategyConfig | None = None

@@ -146,7 +146,7 @@ async def backtest_stats(
                 rows = await cursor.fetchall()
 
             counts = {
-                "PENDING": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0,
+                "PENDING": 0, "IN_TRADE": 0, "WIN": 0, "LOSS": 0, "BREAK_EVEN": 0,
                 "ACTIVE_T2": 0, "PARTIAL_WIN": 0, "EXPIRED": 0, "L2_REJECTED": 0,
             }
             for r in rows:
@@ -161,7 +161,9 @@ async def backtest_stats(
             async with conn.execute(f"SELECT * FROM signals WHERE status IN {_CLOSED} {where_and} ORDER BY id DESC LIMIT 50", params) as cursor:
                 recent_trades = [dict(r) for r in await cursor.fetchall()]
 
-            async with conn.execute(f"SELECT * FROM signals WHERE status IN ('PENDING', 'ACTIVE_T2') {where_and} ORDER BY id DESC", params) as cursor:
+            # 'Pending' here means every open lifecycle stage: waiting
+            # orders, in-trade positions and the T2 tail.
+            async with conn.execute(f"SELECT * FROM signals WHERE status IN ('PENDING', 'IN_TRADE', 'ACTIVE_T2') {where_and} ORDER BY id DESC", params) as cursor:
                 pending_trades = [dict(r) for r in await cursor.fetchall()]
 
             # All closed rows (not just the recent 50) feed the excursion summary
@@ -177,7 +179,7 @@ async def backtest_stats(
                 "losses": counts["LOSS"],
                 "break_even": counts["BREAK_EVEN"],
                 "partial_wins": counts["PARTIAL_WIN"],
-                "pending_count": counts["PENDING"] + counts["ACTIVE_T2"],
+                "pending_count": counts["PENDING"] + counts["IN_TRADE"] + counts["ACTIVE_T2"],
                 "expired_count": counts.get("EXPIRED", 0),
                 "l2_rejected_count": counts.get("L2_REJECTED", 0),
                 "counts": counts,
@@ -193,20 +195,29 @@ async def backtest_stats(
 
 @router.get("/trades")
 async def list_trades(
-    status: str = Query(None, description="Filter: PENDING | WIN | LOSS | ACTIVE_T2 | PARTIAL_WIN | BREAK_EVEN | EXPIRED | L2_REJECTED"),
+    status: str = Query(None, description="Filter: PENDING | IN_TRADE | ACTIVE_T2 | WIN | LOSS | PARTIAL_WIN | BREAK_EVEN | EXPIRED | L2_REJECTED | OPEN"),
     symbol: str = Query(None, description="Filter by symbol"),
     pipeline_version: str = Query(None, description="Filter by pipeline iteration"),
     scope: str = Query("live", description="live (default) excludes shadow pipelines; all includes them"),
-    limit: int = Query(200, le=500),
+    limit: int = Query(200, le=2000),
 ):
-    """Return full trade ledger with optional filters."""
+    """Return full trade ledger with optional filters.
+
+    Deterministic ordering (id DESC) and a truthful total count: the count
+    reflects every row matching the filter, not just the returned page, so
+    the UI can say 'showing 200 of 357' instead of implying completeness.
+    """
     try:
         async with get_connection() as conn:
             clauses = []
             params: list[Any] = []
-            if status and status.upper() != "ALL":
+            status_up = (status or "ALL").upper()
+            if status_up == "OPEN":
+                #OPEN = every not-yet-closed lifecycle stage.
+                clauses.append("status IN ('PENDING', 'IN_TRADE', 'ACTIVE_T2')")
+            elif status_up != "ALL":
                 clauses.append("status = ?")
-                params.append(status.upper())
+                params.append(status_up)
             if symbol:
                 clauses.append("symbol = ?")
                 params.append(symbol.upper())
@@ -216,13 +227,17 @@ async def list_trades(
             elif scope == "live":
                 clauses.append(_shadow_exclusion())
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-            params.append(limit)
+            async with conn.execute(
+                f"SELECT COUNT(*) FROM signals {where}", params,
+            ) as cursor:
+                total = (await cursor.fetchone())[0]
+            query_params = params + [limit]
             async with conn.execute(
                 f"SELECT * FROM signals {where} ORDER BY id DESC LIMIT ?",
-                params,
+                query_params,
             ) as cursor:
                 trades = [dict(r) for r in await cursor.fetchall()]
-            return {"trades": trades, "count": len(trades)}
+            return {"trades": trades, "count": len(trades), "total": total}
     except Exception:
         logger.error("list_trades failed:\n%s", traceback.format_exc())
         return {"trades": [], "count": 0, "error": "Failed to load trades."}

@@ -109,6 +109,18 @@ async def lifespan(app: FastAPI):
     # WebSocket streaming is enabled.
     options_task = ws_memory.start_options_daemon()
 
+    # Gamma setup engine: emits shadow-only setup candidates for the four
+    # underlyings with real options boards. Registers its pipelines at
+    # startup; if that fails the loop still runs and rows land under a
+    # pipeline the ledger already tracks.
+    try:
+        from tpt.engine.gamma_setups import ensure_gamma_shadow_pipelines, gamma_shadow_loop
+        ensure_gamma_shadow_pipelines()
+        gamma_task = asyncio.create_task(gamma_shadow_loop())
+    except Exception as gamma_e:
+        logger.warning("Gamma setup engine failed to start: %s", gamma_e)
+        gamma_task = None
+
     async def _feedback_loop() -> None:
         """Recompute component hit rates from closed trades every hour.
 

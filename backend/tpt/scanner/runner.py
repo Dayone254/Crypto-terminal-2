@@ -150,8 +150,14 @@ async def _persist_pending_signals(rows: list[tuple[Any, ...]]) -> None:
                 async with conn.execute(
                     # Scoped to live pipelines: a staged candidate's PENDING row
                     # must never suppress the live insert (and vice versa).
-                    "SELECT id FROM signals WHERE symbol=? AND status='PENDING' AND CAST(timestamp AS INTEGER) > ? "
-                    "AND pipeline_version NOT IN (SELECT pipeline_version FROM shadow_pipelines)",
+                    # IN_TRADE counts as an open position for dedup: without
+                    # this a fresh signal for the same symbol would stack
+                    # behind a live one.
+                    "SELECT id FROM signals WHERE symbol=? AND status IN ('PENDING','IN_TRADE','ACTIVE_T2') AND CAST(timestamp AS INTEGER) > ? "
+                    # IS NOT NULL guard: one NULL in the subquery would poison
+                    # the NOT IN predicate (UNKNOWN for every row) and silently
+                    # disable dedup.
+                    "AND pipeline_version NOT IN (SELECT pipeline_version FROM shadow_pipelines WHERE pipeline_version IS NOT NULL)",
                     (pid, four_hours_ago),
                 ) as cur:
                     already_exists = await cur.fetchone()
@@ -630,6 +636,20 @@ async def _execute_scan(
                     elif primary_label == "ENTRY_ZONE":
                         primary_label = "COILED"
 
+            # Gamma enrichment: dealer-positioning tags from the options
+            # engine's cache. Recorded on candidates and score_breakdown for
+            # the UI and later weighting; deliberately NOT a scorer input and
+            # NOT a gate yet — the v3.1-gamma-* shadow cohorts must prove edge
+            # in the ledger first. Cheap: cache read only, no venue calls.
+            gamma_ctx = None
+            try:
+                from tpt.engine.gamma_setups import build_gamma_enrichment
+                gamma_ctx = build_gamma_enrichment(pid.split("-")[0])
+            except Exception as gamma_exc:
+                logger.debug("Gamma enrichment unavailable for %s: %s", pid, gamma_exc)
+            if gamma_ctx is not None:
+                score_dict["gamma"] = gamma_ctx
+
             asyncio.create_task(ui_stream.broadcast({
                 "event": "TICKER_SCORED",
                 "product_id": pid,
@@ -718,6 +738,7 @@ async def _execute_scan(
                 "trade_direction": trade_direction,
                 "label": primary_label,
                 "tags": tags,
+                "gamma": gamma_ctx,
                 "ladder": ladder_dict,
                 "pinned": pinned,
             })
