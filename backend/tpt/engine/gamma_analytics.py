@@ -229,12 +229,30 @@ def compute_hedging_profile(
     strike_net_gex: dict[float, float],
     spot: float,
     band_pct: float = 5.0,
+    strike_call_gex: dict[float, float] | None = None,
+    strike_put_gex: dict[float, float] | None = None,
 ) -> dict[str, Any]:
     """Net dealer hedging pressure around spot.
 
-    Positive net GEX at a strike = dealers buy dips there (support);
-    negative = dealers sell rallies there (resistance). The profile splits
-    the near-spot book into the two forces and names the dominant strikes.
+    Support: strikes at/below spot where dealers must buy dips — positive net
+    GEX (dealer long gamma there).
+
+    Resistance: strikes above spot where dealer hedging caps upside. Two
+    mechanisms count:
+    - Positive call GEX (the call wall): dealers are long gamma there and
+      sell into rallies as spot grinds up toward the strike — a pin that
+      acts as resistance. On the long-gamma boards that dominate crypto,
+      this is the DOMINANT upside force; using net GEX only misses it
+      because net = call + put gamma and the put leg's short gamma cancels
+      the call leg at the wall strike.
+    - Negative net GEX (dealer short gamma there): hedging accelerates the
+      move away from the strike, suppressing rallies — kept as a secondary
+      contributor, never double-counted (a strike contributes once, at its
+      larger mechanism).
+
+    ``strike_call_gex`` / ``strike_put_gex`` are optional; without them the
+    profile falls back to the historical net-only reading (resistance =
+    negative net GEX above spot only).
     """
     empty = {
         "bias": "NEUTRAL", "downside_support_gex_m": 0.0,
@@ -247,14 +265,31 @@ def compute_hedging_profile(
     band = spot * band_pct / 100.0
     support = [(k, g) for k, g in strike_net_gex.items()
                if spot - band <= k <= spot and g > 0]
-    resist = [(k, g) for k, g in strike_net_gex.items()
-              if spot < k <= spot + band and g < 0]
+
+    resist_by_strike: dict[float, float] = {}
+    if strike_call_gex is None and strike_put_gex is None:
+        # Legacy callers / minimal inputs: net-only reading.
+        for k, g in strike_net_gex.items():
+            if spot < k <= spot + band and g < 0:
+                resist_by_strike[k] = abs(g)
+    else:
+        call_gex = strike_call_gex or {}
+        put_gex = strike_put_gex or {}
+        for k in strike_net_gex:
+            if not (spot < k <= spot + band):
+                continue
+            net = strike_net_gex[k]
+            call_pin = max(call_gex.get(k, 0.0), 0.0)   # call wall: pin/ceiling
+            put_accel = max(-put_gex.get(k, 0.0), 0.0)  # short put gamma: chase fuel
+            pressure = max(call_pin, put_accel, abs(net) if net < 0 else 0.0)
+            if pressure > 0:
+                resist_by_strike[k] = pressure
 
     sup_total = sum(g for _, g in support) / 1e6
-    res_total = abs(sum(g for _, g in resist)) / 1e6
+    res_total = sum(resist_by_strike.values()) / 1e6
 
     top_sup = sorted(support, key=lambda x: x[1], reverse=True)[:3]
-    top_res = sorted(resist, key=lambda x: abs(x[1]), reverse=True)[:3]
+    top_res = sorted(resist_by_strike.items(), key=lambda x: x[1], reverse=True)[:3]
 
     if sup_total + res_total < 0.5:
         bias = "NEUTRAL"
@@ -270,7 +305,7 @@ def compute_hedging_profile(
         "downside_support_gex_m": round(sup_total, 2),
         "upside_resistance_gex_m": round(res_total, 2),
         "top_supportive": [{"strike": k, "gex_m": round(g / 1e6, 2)} for k, g in top_sup],
-        "top_suppressive": [{"strike": k, "gex_m": round(abs(g) / 1e6, 2)} for k, g in top_res],
+        "top_suppressive": [{"strike": k, "gex_m": round(g / 1e6, 2)} for k, g in top_res],
     }
 
 
@@ -373,7 +408,11 @@ def compute_institutional_analytics(
         "max_pain": compute_max_pain(strike_call_oi, strike_put_oi, spot_price),
         "skew": compute_skew_metrics(board, spot_price),
         "expiry_clusters": compute_expiry_clusters(board),
-        "hedging_profile": compute_hedging_profile(strike_net_gex, spot_price),
+        "hedging_profile": compute_hedging_profile(
+            strike_net_gex, spot_price,
+            strike_call_gex=strike_call_gex,
+            strike_put_gex=strike_put_gex,
+        ),
         "pin_map": compute_pin_map(strike_net_gex, spot_price),
         "confidence": compute_confidence(board, venue_metrics, spot_price,
                                          vol_surface_fitted),

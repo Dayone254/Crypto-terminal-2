@@ -140,6 +140,22 @@ async def calculate_macro_gamma_exposure(
         # network spot-fetch is attempted.
         board = [x for x in board if isinstance(x, dict) and x.get("underlying", "").upper() == underlying.upper()]
 
+        # How many expiry buckets the FULL loaded chain holds (before any
+        # expiry-band filtering) — the completeness reference for the
+        # payload's expiry_count below. During venue/WS reconnect gaps only
+        # the nearest expiry's tickers have arrived and the loaded-board
+        # count collapses with them, so prefer the Deribit WS instrument
+        # universe: it is seeded for every subscribed expiry at connect
+        # time and stays stable across the gaps.
+        chain_expiry_count = len({str(x.get("expiry_str", "")) for x in board})
+        try:
+            from tpt.adapters.deribit_ws import expected_expiry_count
+            ws_expected = expected_expiry_count(underlying)
+            if ws_expected > chain_expiry_count:
+                chain_expiry_count = ws_expected
+        except Exception:
+            pass
+
         # No options market and synthetic fallback disabled: refuse to invent
         # levels. The old fallback chain ended in a hardcoded BTC price
         # (85875.50) that silently anchored every synthetic strike — BTC-scale
@@ -684,6 +700,10 @@ async def calculate_macro_gamma_exposure(
             f"regime={'LONG' if total_gex >= 0 else 'SHORT'}_GAMMA"
         )
 
+        # Expiries that actually contributed gamma in THIS payload — the
+        # fingerprint a UI needs to detect a partial (reconnect-gap) board.
+        expiry_count = len({str(c["opt"].get("expiry_str", "")) for c in valid_contracts})
+
         payload = {
             "underlying":                underlying,
             "expiry_filter":             expiry_filter,
@@ -697,6 +717,8 @@ async def calculate_macro_gamma_exposure(
             "oi_flow":                   oi_flow,
             "confidence":                analytics.get("confidence"),
             "regime_transitions":        recent_flips,
+            "expiry_count":              expiry_count,
+            "chain_expiry_count":        chain_expiry_count,
             "spot_price":                spot_price,
             "total_net_gex_millions":    round(total_gex / 1e6, 2),
             "net_dealer_delta_millions": round(total_dealer_delta / 1e6, 2),

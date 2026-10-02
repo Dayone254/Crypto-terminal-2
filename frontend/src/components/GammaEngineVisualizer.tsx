@@ -73,6 +73,12 @@ export interface GammaEngineData {
     };
     // Set to false by the backend when no same-day contracts exist (e.g. BTC on non-Friday)
     expiry_available?: boolean;
+    // Board-completeness fingerprint: how many expiry buckets contributed to
+    // THIS payload vs how many the full loaded chain holds. A big gap means a
+    // partial board (venue reconnect gap) — captions calibrated for a full
+    // chain should be suppressed.
+    expiry_count?: number;
+    chain_expiry_count?: number;
 }
 
 export interface GammaEngineProps {
@@ -278,9 +284,28 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
     const allClusters = hasData ? data?.expiry_clusters ?? [] : [];
     const clusters = allClusters.filter((c) => c.expiry !== "_0DTE_SHARE").slice(0, 3);
     const zeroDteShare = allClusters.find((c) => c.expiry === "_0DTE_SHARE")?.share_pct ?? null;
+    // Partial-board guard: a truncated chain (venue reconnect gap) shows one
+    // expiry at ~100% share — regime captions calibrated for full boards would
+    // mislead. Backend supplies the loaded-chain reference count.
+    const chainExpiries = data?.chain_expiry_count ?? 0;
+    const boardExpiries = data?.expiry_count ?? clusters.length;
+    const partialBoard = expiryFilter === "ALL"
+        && boardExpiries > 0
+        && chainExpiries >= 2
+        && boardExpiries <= Math.ceil(chainExpiries / 2);
     const hedging = hasData ? data?.hedging_profile ?? null : null;
     const oiFlow = hasData ? data?.oi_flow ?? null : null;
     const skewMetrics = hasData ? data?.skew ?? null : null;
+    // |RR25| below 0.5 IV points is flat by desk convention — alarmist copy
+    // on a -0.05% reading overstated directional put demand.
+    const rr25Flat = skewMetrics != null && Math.abs(skewMetrics.rr25_pct) < 0.5;
+    const rr25Caption = skewMetrics == null
+        ? ""
+        : rr25Flat
+            ? "Flat — no meaningful directional skew in the 25Δ wings."
+            : skewMetrics.rr25_pct < 0
+                ? "Puts bid — crash-hedge demand elevated."
+                : "Calls bid — upside chase demand.";
     const transitions = hasData ? (data?.regime_transitions ?? []).slice(-4).reverse() : [];
     const confidence = hasData ? data?.confidence ?? null : null;
     const fmtNotional = (v: number) =>
@@ -488,6 +513,27 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                 </div>
             )}
 
+            {/* ─── PARTIAL BOARD BANNER (truncated chain during reconnects) ── */}
+            {hasData && expiryFilter === "ALL" && partialBoard && (
+                <div style={{
+                    padding: "0.55rem 0.85rem",
+                    background: "rgba(245, 158, 11, 0.08)",
+                    border: "1px solid rgba(245, 158, 11, 0.3)",
+                    borderRadius: "6px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    fontSize: "0.68rem",
+                    color: "#f59e0b",
+                }}>
+                    <span style={{ fontSize: "0.85rem" }}>⚠</span>
+                    <span>
+                        <strong>Partial board.</strong>{" "}
+                        {boardExpiries} of ~{chainExpiries} loaded expiries contributed gamma — levels reflect the loaded slice only and will shift as the chain refills.
+                    </span>
+                </div>
+            )}
+
             {/* ─── NO OPTIONS MARKET BANNER (honest empty state) ────────────── */}
             {data && data.options_available === false && (
                 <div style={{
@@ -601,7 +647,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
             <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.5rem" }}>
                 <div style={{ padding: "0.6rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(16, 185, 129, 0.15)", borderRadius: "6px" }}>
                     <span style={{ fontSize: "0.6rem", color: "#10b981", fontWeight: 800 }}>
-                        + {isLongGamma ? "LONG GAMMA" : "SHORT GAMMA"} (${totalGex.toFixed(1)}M GEX)
+                        + {isLongGamma ? "LONG GAMMA" : "SHORT GAMMA"} (${totalGex.toFixed(1)}M GEX / 1% move)
                     </span>
                     <p style={{ fontSize: "0.64rem", color: "#cbd5e1", marginTop: "0.25rem", margin: 0, lineHeight: 1.3 }}>
                         {isLongGamma ? "Dealers likely dampening short-term volatility." : "Market makers hedge in direction of trend."}
@@ -619,7 +665,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
 
                 <div style={{ padding: "0.6rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(244, 63, 94, 0.15)", borderRadius: "6px" }}>
                     <span style={{ fontSize: "0.6rem", color: "#f43f5e", fontWeight: 800 }}>
-                        🚨 PUT SKEW +{ivSkewPct}%
+                        🚨 PUT SKEW {ivSkewPct}%
                     </span>
                     <p style={{ fontSize: "0.64rem", color: "#cbd5e1", marginTop: "0.25rem", margin: 0, lineHeight: 1.3 }}>
                         Puts more expensive than calls.
@@ -639,7 +685,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
             {/* ─── ROW 1.5: DEALER HEDGING PRESSURE · SKEW · 24H FLOW ─────── */}
             <div style={{ display: hasData ? "grid" : "none", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.5rem" }}>
                 <div style={{ padding: "0.65rem 0.75rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "6px" }}>
-                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>DEALER HEDGING PRESSURE (±5% band)</span>
+                    <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>DEALER HEDGING PRESSURE (±5% BAND · GEX PER 1% MOVE)</span>
                     {hedging ? (
                         <>
                             <div style={{ fontSize: "0.95rem", fontWeight: 900, marginTop: "0.25rem", color: hedging.bias === "SUPPORTIVE" ? "#10b981" : hedging.bias === "SUPPRESSIVE" ? "#f43f5e" : "#94a3b8" }}>
@@ -663,14 +709,14 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                     <span style={{ fontSize: "0.62rem", fontWeight: 800, color: "#64748b" }}>VOL SKEW (25Δ)</span>
                     {skewMetrics ? (
                         <>
-                            <div style={{ fontSize: "0.95rem", fontWeight: 900, marginTop: "0.25rem", color: skewMetrics.rr25_pct < 0 ? "#f43f5e" : "#10b981" }}>
+                            <div style={{ fontSize: "0.95rem", fontWeight: 900, marginTop: "0.25rem", color: rr25Flat ? "#94a3b8" : skewMetrics.rr25_pct < 0 ? "#f43f5e" : "#10b981" }}>
                                 RR25 {skewMetrics.rr25_pct >= 0 ? "+" : ""}{skewMetrics.rr25_pct.toFixed(2)}%
                             </div>
                             <div style={{ fontSize: "0.6rem", color: "#cbd5e1", marginTop: "0.2rem" }}>
                                 Fly25 {skewMetrics.fly25_pct >= 0 ? "+" : ""}{skewMetrics.fly25_pct.toFixed(2)}% · {skewMetrics.ref_expiry}
                             </div>
                             <div style={{ fontSize: "0.58rem", color: "#64748b", marginTop: "0.25rem" }}>
-                                {skewMetrics.rr25_pct < 0 ? "Puts bid — crash-hedge demand elevated." : "Calls bid — upside chase demand."}
+                                {rr25Caption}
                             </div>
                         </>
                     ) : (
@@ -729,8 +775,8 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                         <div style={{ fontSize: "0.62rem", color: "#64748b", marginTop: "0.25rem" }}>No expiry notional in current board.</div>
                     )}
                     {zeroDteShare !== null && (
-                        <div style={{ fontSize: "0.58rem", color: zeroDteShare > 50 ? "#f59e0b" : "#64748b", marginTop: "0.3rem", fontWeight: 700 }}>
-                            0DTE share: {zeroDteShare.toFixed(1)}%{zeroDteShare > 50 ? " — expiry-day regime, pin risk dominates" : ""}
+                        <div style={{ fontSize: "0.58rem", color: clusters.length > 1 && zeroDteShare > 50 ? "#f59e0b" : "#64748b", marginTop: "0.3rem", fontWeight: 700 }}>
+                            0DTE share: {zeroDteShare.toFixed(1)}%{clusters.length > 1 && zeroDteShare > 50 ? " — expiry-day regime, pin risk dominates" : ""}
                         </div>
                     )}
                 </div>
@@ -965,7 +1011,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                                     </div>
 
                                     <div style={{ textAlign: "center", color: isSpotStrike ? "#38bdf8" : "#94a3b8", fontWeight: isSpotStrike ? 900 : 600 }}>
-                                        {stk >= 1000 ? `${Math.round(stk / 1000)}K` : stk}
+                                        {stk >= 1000 ? `${(stk / 1000).toFixed(stk % 1000 === 0 ? 0 : 1)}K` : stk}
                                     </div>
 
                                     <div style={{ display: "flex", justifyContent: "flex-start" }}>
@@ -989,7 +1035,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                     <span style={{ fontSize: "0.75rem", fontWeight: 900, color: "#f8fafc", letterSpacing: "0.04em" }}>MARKET DATA</span>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem" }}>
                         <div style={{ padding: "0.5rem 0.6rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "5px" }}>
-                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>NET DEALER Δ</span>
+                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>NET DEALER Δ ($ NOTIONAL)</span>
                             <div style={{ fontSize: "0.8rem", fontWeight: 900, color: dealerDelta >= 0 ? "#10b981" : "#f43f5e", marginTop: "0.1rem" }}>
                                 ${dealerDelta.toFixed(2)}M
                             </div>
@@ -998,14 +1044,14 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             </span>
                         </div>
                         <div style={{ padding: "0.5rem 0.6rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "5px" }}>
-                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER THETA</span>
+                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER THETA ($/DAY)</span>
                             <div style={{ fontSize: "0.8rem", fontWeight: 900, color: "#f8fafc", marginTop: "0.1rem" }}>
                                 ${dealerTheta.toFixed(2)}M
                             </div>
                             <span style={{ fontSize: "0.55rem", color: "#94a3b8" }}>Theta Positive</span>
                         </div>
                         <div style={{ padding: "0.5rem 0.6rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "5px" }}>
-                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER VEGA</span>
+                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER VEGA ($ / 1PP IV)</span>
                             <div style={{ fontSize: "0.8rem", fontWeight: 900, color: dealerVega >= 0 ? "#10b981" : "#f43f5e", marginTop: "0.1rem" }}>
                                 ${dealerVega.toFixed(2)}M
                             </div>
@@ -1014,7 +1060,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             </span>
                         </div>
                         <div style={{ padding: "0.5rem 0.6rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "5px" }}>
-                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER VANNA</span>
+                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER VANNA ($ / 1PP IV)</span>
                             <div style={{ fontSize: "0.8rem", fontWeight: 900, color: (data?.net_dealer_vanna_millions ?? 0) >= 0 ? "#10b981" : "#f43f5e", marginTop: "0.1rem" }}>
                                 ${data?.net_dealer_vanna_millions !== undefined ? `${data.net_dealer_vanna_millions.toFixed(2)}M` : "N/A"}
                             </div>
@@ -1023,9 +1069,9 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                             </span>
                         </div>
                         <div style={{ padding: "0.5rem 0.6rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "5px" }}>
-                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER CHARM</span>
+                            <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>DEALER CHARM ($/DAY)</span>
                             <div style={{ fontSize: "0.8rem", fontWeight: 900, color: "#f8fafc", marginTop: "0.1rem" }}>
-                                {data?.net_dealer_charm !== undefined ? `${data.net_dealer_charm.toFixed(1)}/day` : "N/A"}
+                                {data?.net_dealer_charm !== undefined ? `$${data.net_dealer_charm.toFixed(1)}/day` : "N/A"}
                             </div>
                             <span style={{ fontSize: "0.55rem", color: "#94a3b8" }}>Daily Delta Bleed</span>
                         </div>
@@ -1041,7 +1087,7 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                         <div style={{ padding: "0.5rem 0.6rem", background: "rgba(11, 16, 26, 0.7)", border: "1px solid rgba(255, 255, 255, 0.05)", borderRadius: "5px" }}>
                             <span style={{ fontSize: "0.55rem", color: "#64748b", fontWeight: 700 }}>SKEW</span>
                             <div style={{ fontSize: "0.8rem", fontWeight: 900, color: "#10b981", marginTop: "0.1rem" }}>
-                                +{ivSkewPct}%
+                                {ivSkewPct}%
                             </div>
                             <span style={{ fontSize: "0.55rem", color: "#10b981" }}>Put Skew</span>
                         </div>
@@ -1060,19 +1106,19 @@ export const GammaEngineVisualizer: React.FC<GammaEngineProps> = ({
                         <span style={{ fontSize: "0.75rem", fontWeight: 900, color: "#f8fafc", letterSpacing: "0.04em" }}>DEALER POSITIONING</span>
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem", fontSize: "0.62rem" }}>
                             <div>
-                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>DELTA</span>
+                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>DELTA (NOTIONAL)</span>
                                 <strong style={{ color: dealerDelta >= 0 ? "#10b981" : "#f43f5e" }}>${dealerDelta.toFixed(2)}M</strong>
                             </div>
                             <div>
-                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>GAMMA</span>
+                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>GAMMA (/1% MOVE)</span>
                                 <strong style={{ color: totalGex >= 0 ? "#10b981" : "#f43f5e" }}>+${totalGex.toFixed(2)}M</strong>
                             </div>
                             <div>
-                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>VEGA</span>
+                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>VEGA (/1PP IV)</span>
                                 <strong style={{ color: dealerVega >= 0 ? "#10b981" : "#f43f5e" }}>${dealerVega.toFixed(2)}M</strong>
                             </div>
                             <div>
-                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>THETA</span>
+                                <span style={{ color: "#64748b", fontWeight: 700, display: "block" }}>THETA (/DAY)</span>
                                 <strong style={{ color: "#10b981" }}>+${dealerTheta.toFixed(2)}M</strong>
                             </div>
                         </div>

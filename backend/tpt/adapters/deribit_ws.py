@@ -61,6 +61,23 @@ def is_live(underlying: str) -> bool:
     return time.time() - _LAST_UPDATE.get(underlying.upper(), 0.0) < _MAX_STALE_SECONDS
 
 
+def expected_expiry_count(underlying: str) -> int:
+    """Distinct expiry buckets in the subscribed instrument universe.
+
+    Counts every instrument seeded at subscribe time — including ones whose
+    tickers have not arrived (or re-arrived) yet — so the count stays stable
+    across WS reconnect gaps, when only the nearest expiry's tickers have
+    landed in the live board. Returns 0 when no WS board has ever been
+    seeded for this underlying (REST-only venue path)."""
+    board_dict = _LIVE_BOARDS.get((underlying or "").upper(), {})
+    expiries: set[str] = set()
+    for data in board_dict.values():
+        parsed = data.get("_parsed")
+        if parsed:
+            expiries.add(parsed[0])
+    return len(expiries)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

@@ -107,6 +107,71 @@ def test_hedging_profile_suppressive_and_empty():
     assert compute_hedging_profile({}, spot=100.0)["bias"] == "NEUTRAL"
 
 
+def test_hedging_profile_counts_call_wall_as_resistance():
+    """The live-board bug: on a long-gamma board the call wall carries
+    POSITIVE net GEX (put-leg short gamma cancels the call leg), so the old
+    net-only resistance test (g < 0) returned 0.0 resistance under an
+    acknowledged $85K call wall. Positive call GEX above spot is a dealer
+    pin that caps upside and must count."""
+    spot = 100.0
+    gex = {105.0: +3e8}          # call wall: net positive, above spot
+    call = {105.0: +5e8}
+    put = {105.0: -2e8}
+    res = compute_hedging_profile(gex, spot, strike_call_gex=call, strike_put_gex=put)
+    assert res["upside_resistance_gex_m"] == pytest.approx(500.0)
+    assert res["top_suppressive"][0]["strike"] == 105.0
+    assert res["top_suppressive"][0]["gex_m"] == pytest.approx(500.0)
+
+    # Legacy signature (no side books) keeps the historical net-only reading:
+    assert compute_hedging_profile(gex, spot)["upside_resistance_gex_m"] == 0.0
+
+
+def test_hedging_profile_never_double_counts_a_strike():
+    """A strike with a call pin AND short-put-gamma acceleration AND negative
+    net GEX contributes once, at its LARGEST mechanism (max, not the sum)."""
+    spot = 100.0
+    gex = {104.0: -1e8}          # net negative (short put gamma dominates)
+    call = {104.0: +9e8}         # call pin
+    put = {104.0: -10e8}         # short put gamma, larger than the pin
+    res = compute_hedging_profile(gex, spot, strike_call_gex=call, strike_put_gex=put)
+    # Sum would be 9e8 + 10e8 + 1e8 = 20e8; max is 10e8.
+    assert res["upside_resistance_gex_m"] == pytest.approx(1000.0)
+    assert len(res["top_suppressive"]) == 1
+    assert res["top_suppressive"][0]["gex_m"] == pytest.approx(1000.0)
+
+
+def test_hedging_profile_positive_gex_below_spot_is_support_not_resistance():
+    """Positive net GEX at/below spot keeps its SUPPORT role (dealer buys
+    dips there); it must not leak into the resistance book."""
+    res = compute_hedging_profile(
+        {95.0: 4e8}, spot=100.0,
+        strike_call_gex={95.0: 4e8}, strike_put_gex={95.0: 0.0},
+    )
+    assert res["downside_support_gex_m"] == pytest.approx(400.0)
+    assert res["upside_resistance_gex_m"] == 0.0
+
+
+def test_hedging_profile_strikes_outside_band_ignored_with_side_books():
+    res = compute_hedging_profile(
+        {120.0: 9e8, 80.0: 9e8}, spot=100.0,
+        strike_call_gex={120.0: 9e8}, strike_put_gex={80.0: 9e8},
+    )
+    assert res["upside_resistance_gex_m"] == 0.0
+    assert res["downside_support_gex_m"] == 0.0
+    assert res["top_suppressive"] == []
+    assert res["top_supportive"] == []
+
+
+def test_hedging_profile_short_put_gamma_above_spot_counts_as_resistance():
+    """Negative put GEX above spot (dealer short put gamma) accelerates
+    rallies — counted via the put book even when the call leg is flat."""
+    res = compute_hedging_profile(
+        {104.0: -2e8}, spot=100.0,
+        strike_call_gex={104.0: 0.0}, strike_put_gex={104.0: -2e8},
+    )
+    assert res["upside_resistance_gex_m"] == pytest.approx(200.0)
+
+
 # ─── PIN MAP ──────────────────────────────────────────────────────────────
 
 def test_pin_map_weights_distance_and_excludes_negatives():

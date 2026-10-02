@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from tpt.config.strategy import StrategyConfig
@@ -134,9 +135,27 @@ async def persist_shadow_signals(records: list[ShadowRecord]) -> int:
     from tpt.db.write_lock import db_write_lock
 
     inserted = 0
+    # Time-dedup, mirroring the live path's rule: one open shadow row per
+    # (pipeline_version, symbol) within the window. Without this, every scan
+    # re-recorded every still-actionable setup across all staged cohorts —
+    # 1,630 shadow rows vs 228 live rows in a 6h window — burying the live
+    # ledger and rotating the visible page on every refresh. IN_TRADE and
+    # ACTIVE_T2 count as open (a shadow cohort mirrors the whole lifecycle),
+    # and the pipeline_version IS NOT NULL guard keeps a single NULL from
+    # poisoning the NOT IN predicate.
+    four_hours_ago = int(time.time()) - (4 * 3600)
     async with db_write_lock:
         async with get_connection() as conn:
             for r in records:
+                async with conn.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND pipeline_version=? "
+                    "AND status IN ('PENDING','IN_TRADE','ACTIVE_T2') "
+                    "AND CAST(timestamp AS INTEGER) > ?",
+                    (r["symbol"], r["pipeline_version"], four_hours_ago),
+                ) as cur:
+                    already_open = await cur.fetchone()
+                if already_open:
+                    continue
                 await conn.execute(
                     """INSERT INTO signals
                     (scan_run_id, symbol, timestamp, score, score_breakdown, label, trade_direction,

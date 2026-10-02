@@ -176,11 +176,14 @@ export default function EdgePage() {
                 setStats(s);
                 setCachedData(cacheKeyStats, s);
             }
-            if (t && t.trades) {
+            // A failed read returns { error, trades: [] } — that must NEVER
+            // overwrite the last good list (or its cache): an empty ledger on a
+            // transient API hiccup reads as "the system has no trades".
+            if (t && !t.error && Array.isArray(t.trades)) {
                 setTrades(t.trades);
                 setCachedData(cacheKeyTrades, t.trades);
             }
-            if (sym && sym.symbols) {
+            if (sym && !sym.error && Array.isArray(sym.symbols)) {
                 setSymbols(sym.symbols);
                 setCachedData(cacheKeySymbols, sym.symbols);
             }
